@@ -12,7 +12,21 @@
     <p class="subtitle">Status dashboard for ntp.local</p>
   </header>
   <main>
-    <p class="placeholder">Dashboard coming soon.</p>
+    <p id="error-banner" class="error-banner" hidden></p>
+    <div class="panels">
+      <section>
+        <h2>GPS</h2>
+        <div id="gps-panel">Loading…</div>
+      </section>
+      <section>
+        <h2>NTP</h2>
+        <div id="ntp-panel">Loading…</div>
+      </section>
+    </div>
+    <section>
+      <h2>Sources</h2>
+      <div id="sources-panel">Loading…</div>
+    </section>
   </main>
   <script src="dashboard.js"></script>
 </body>
