@@ -1,3 +1,12 @@
+:root {
+  --series-1: #3987e5;
+  --text-muted: #898781;
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #e66767;
+}
+
 body {
   font-family: system-ui, sans-serif;
   margin: 0;
@@ -67,12 +76,34 @@ dd {
   margin: 0;
 }
 
-dd.ok {
-  color: #3fb950;
+.status-line {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
 }
 
-dd.warn {
-  color: #d29922;
+.status-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-good {
+  background: var(--status-good);
+}
+
+.status-warning {
+  background: var(--status-warning);
+}
+
+.status-serious {
+  background: var(--status-serious);
+}
+
+.status-critical {
+  background: var(--status-critical);
 }
 
 table {
@@ -93,9 +124,104 @@ th {
 }
 
 tr.state-selected {
-  color: #3fb950;
+  color: var(--status-good);
 }
 
 tr.state-rejected {
-  color: #8b98a5;
+  color: var(--text-muted);
+}
+
+.sky-svg {
+  width: 100%;
+  max-width: 260px;
+  height: auto;
+  display: block;
+  margin: 0 auto;
+}
+
+.sky-horizon {
+  fill: none;
+  stroke: #30363d;
+  stroke-width: 1;
+}
+
+.sky-ring {
+  fill: none;
+  stroke: #21262d;
+  stroke-width: 1;
+}
+
+.sky-label {
+  fill: var(--text-muted);
+  font-size: 10px;
+}
+
+.sky-dot-used {
+  fill: var(--series-1);
+  stroke: #161b22;
+  stroke-width: 2;
+}
+
+.sky-dot-unused {
+  fill: var(--text-muted);
+  stroke: #161b22;
+  stroke-width: 2;
+  opacity: 0.6;
+}
+
+.legend {
+  display: flex;
+  justify-content: center;
+  gap: 1.25rem;
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.legend .dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 0.35rem;
+}
+
+.dot-used {
+  background: var(--series-1);
+}
+
+.dot-unused {
+  background: var(--text-muted);
+  opacity: 0.6;
+}
+
+.sparkline-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.sparkline-line {
+  fill: none;
+  stroke: var(--text-muted);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.sparkline-dot {
+  fill: var(--series-1);
+  stroke: #161b22;
+  stroke-width: 2;
+}
+
+.sparkline-caption {
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  margin-top: 0.25rem;
+}
+
+.muted {
+  color: var(--text-muted);
 }
