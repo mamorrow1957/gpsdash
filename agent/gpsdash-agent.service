@@ -1,0 +1,13 @@
+[Unit]
+Description=gpsdash agent — chrony/gpsd status exporter
+After=network.target chrony.service gpsd.service
+
+[Service]
+Type=simple
+User=michael
+WorkingDirectory=/home/michael/gpsdash-agent
+ExecStart=/usr/bin/python3 server.py
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

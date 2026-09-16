@@ -35,7 +35,7 @@ test:
     - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "dev"'
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
 
-deploy:
+deploy-dashboard:
   stage: deploy
   tags:
     - self-hosted
@@ -50,6 +50,28 @@ deploy:
       else
         curl -s --max-time 10 -X POST -H 'Content-type: application/json' \
           --data '{"text":":fire: *gpsdash deploy failed* — check the server!"}' \
+          "$SLACK_WEBHOOK_URL" || true
+      fi
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  needs:
+    - test
+
+deploy-agent:
+  stage: deploy
+  tags:
+    - ntp-local
+  script:
+    - agent/deploy.sh
+  after_script:
+    - |
+      if [ "$CI_JOB_STATUS" = "success" ]; then
+        curl -s --max-time 10 -X POST -H 'Content-type: application/json' \
+          --data '{"text":":rocket: *gpsdash agent deployed successfully* to ntp.local"}' \
+          "$SLACK_WEBHOOK_URL" || true
+      else
+        curl -s --max-time 10 -X POST -H 'Content-type: application/json' \
+          --data '{"text":":fire: *gpsdash agent deploy failed* — check ntp.local!"}' \
           "$SLACK_WEBHOOK_URL" || true
       fi
   rules:
