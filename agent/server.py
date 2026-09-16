@@ -121,6 +121,16 @@ def get_gps_fix():
                 fix["satellites_visible"] = len(sats)
                 fix["satellites_used"] = sum(1 for s in sats if s.get("used"))
                 fix["hdop"] = getattr(report, "hdop", None)
+                fix["satellites"] = [
+                    {
+                        "prn": s.get("PRN"),
+                        "az": s.get("az"),
+                        "el": s.get("el"),
+                        "ss": s.get("ss"),
+                        "used": bool(s.get("used")),
+                    }
+                    for s in sats
+                ]
                 have_sky = True
     except StopIteration:
         pass
