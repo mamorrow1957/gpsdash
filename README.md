@@ -43,7 +43,7 @@ npm test
 
 ## Deployment
 
-The `deploy` CI job runs automatically on pushes to `main`. It pulls the latest code on the server, installs production dependencies, and restarts the `gpsdash` systemd service.
+The `deploy` CI job runs automatically on pushes to `main`. It syncs the tested checkout to `/home/michael/gpsdash` on the server, installs production dependencies, and restarts the `gpsdash` systemd service.
 
 One-time server setup (not handled by CI):
 
@@ -53,12 +53,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now gpsdash
 ```
 
-To deploy manually from the server:
-
-```bash
-cd ~/gpsdash && git pull origin main
-~/gpsdash/scripts/deploy.sh
-```
+To deploy manually, run `scripts/deploy.sh` from a checkout of this repo on the server — it syncs itself to `/home/michael/gpsdash` and restarts the service.
 
 ## CI/CD
 

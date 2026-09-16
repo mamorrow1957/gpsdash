@@ -40,8 +40,7 @@ deploy:
   tags:
     - self-hosted
   script:
-    - cd ~/gpsdash && git pull origin main
-    - ~/gpsdash/scripts/deploy.sh
+    - scripts/deploy.sh
   after_script:
     - |
       if [ "$CI_JOB_STATUS" = "success" ]; then
