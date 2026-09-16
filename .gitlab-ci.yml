@@ -1,0 +1,59 @@
+stages:
+  - test
+  - deploy
+
+test:
+  stage: test
+  image: node:20
+  cache:
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - .npm/
+  script:
+    - npm ci --cache .npm --prefer-offline
+    - npx playwright install --with-deps chromium
+    - npm test
+  after_script:
+    - |
+      if [ "$CI_JOB_STATUS" = "success" ]; then
+        curl -s --max-time 10 -X POST -H 'Content-type: application/json' \
+          --data "{\"text\":\":white_check_mark: *gpsdash tests passed* on \`$CI_COMMIT_REF_NAME\`\n$CI_COMMIT_MESSAGE\"}" \
+          "$SLACK_WEBHOOK_URL" || true
+      else
+        curl -s --max-time 10 -X POST -H 'Content-type: application/json' \
+          --data "{\"text\":\":x: *gpsdash tests failed* on \`$CI_COMMIT_REF_NAME\`\n$CI_COMMIT_MESSAGE\nSee: $CI_PIPELINE_URL\"}" \
+          "$SLACK_WEBHOOK_URL" || true
+      fi
+  artifacts:
+    when: always
+    paths:
+      - playwright-report/
+    expire_in: 14 days
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "dev"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
+
+deploy:
+  stage: deploy
+  tags:
+    - self-hosted
+  script:
+    - cd ~/gpsdash && git pull origin main
+    - ~/gpsdash/scripts/deploy.sh
+  after_script:
+    - |
+      if [ "$CI_JOB_STATUS" = "success" ]; then
+        curl -s --max-time 10 -X POST -H 'Content-type: application/json' \
+          --data '{"text":":rocket: *gpsdash deployed successfully* to https://gpsdash.morroweb.com"}' \
+          "$SLACK_WEBHOOK_URL" || true
+      else
+        curl -s --max-time 10 -X POST -H 'Content-type: application/json' \
+          --data '{"text":":fire: *gpsdash deploy failed* — check the server!"}' \
+          "$SLACK_WEBHOOK_URL" || true
+      fi
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  needs:
+    - test

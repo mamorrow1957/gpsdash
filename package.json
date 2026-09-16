@@ -1,0 +1,27 @@
+{
+  "name": "gpsdash",
+  "version": "1.0.0",
+  "description": "Status dashboard for ntp.local, a GPS-disciplined stratum-1 NTP server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "playwright test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://gitlab.morroweb.com/michael/gpsdash.git"
+  },
+  "keywords": [],
+  "author": "Michael Morrow",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://gitlab.morroweb.com/michael/gpsdash/-/issues"
+  },
+  "homepage": "https://gitlab.morroweb.com/michael/gpsdash",
+  "dependencies": {
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.1"
+  }
+}

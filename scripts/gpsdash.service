@@ -1,0 +1,14 @@
+[Unit]
+Description=gpsdash — ntp.local status dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=michael
+WorkingDirectory=/home/michael/gpsdash
+ExecStart=/usr/bin/node server.js
+Environment=PORT=3000
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
