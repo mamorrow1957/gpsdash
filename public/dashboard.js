@@ -1,7 +1,8 @@
 // Frontend logic for gpsdash — polls the backend for ntp.local GPS/NTP status.
 
-const POLL_INTERVAL_MS = 5000;
-const MAX_OFFSET_HISTORY = 60; // 5 min at 5s interval
+const POLL_INTERVAL_MS = 2000;
+const OFFSET_HISTORY_WINDOW_MS = 5 * 60 * 1000; // sparkline shows the last 5 minutes
+const MAX_OFFSET_HISTORY = OFFSET_HISTORY_WINDOW_MS / POLL_INTERVAL_MS;
 
 const FIX_MODE_LABELS = { 0: "Unknown", 1: "No fix", 2: "2D fix", 3: "3D fix" };
 
@@ -200,7 +201,11 @@ function renderOffsetSparkline() {
   `;
 }
 
+let polling = false;
+
 async function poll() {
+  if (polling) return; // skip this tick if the previous request is still in flight
+  polling = true;
   const banner = document.getElementById("error-banner");
   try {
     const res = await fetch("/api/status");
@@ -219,6 +224,8 @@ async function poll() {
   } catch (err) {
     banner.textContent = `Could not load status: ${err.message}`;
     banner.hidden = false;
+  } finally {
+    polling = false;
   }
 }
 
