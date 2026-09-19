@@ -140,6 +140,13 @@ function renderSkyPlot(satellites) {
   `;
 }
 
+function niceStep(range) {
+  const target = range / 3;
+  const pow = Math.pow(10, Math.floor(Math.log10(target)));
+  const n = target / pow;
+  return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * pow;
+}
+
 function renderOffsetSparkline() {
   const el = document.getElementById("offset-sparkline");
   if (offsetHistory.length < 2) {
@@ -147,22 +154,45 @@ function renderOffsetSparkline() {
     return;
   }
   const w = 320;
-  const h = 56;
-  const pad = 6;
+  const h = 96;
+  const padL = 44;
+  const padR = 8;
+  const padT = 10;
+  const padB = 18;
   const min = Math.min(...offsetHistory);
   const max = Math.max(...offsetHistory);
-  const range = Math.max(max - min, 0.5);
-  const stepX = (w - pad * 2) / (offsetHistory.length - 1);
-  const toXY = (v, i) => {
-    const x = pad + i * stepX;
-    const y = h - pad - ((v - min) / range) * (h - pad * 2);
-    return [x, y];
-  };
+  const dataMin = Math.min(min, 0);
+  const dataMax = Math.max(max, 0);
+  const step = niceStep(Math.max(dataMax - dataMin, 0.5));
+  const axisMin = Math.floor(dataMin / step) * step;
+  let axisMax = Math.ceil(dataMax / step) * step;
+  if (axisMax <= axisMin) axisMax = axisMin + step;
+  const axisRange = axisMax - axisMin;
+  const decimals = step >= 1 ? 0 : Math.min(3, Math.ceil(-Math.log10(step)));
+  const stepX = (w - padL - padR) / (offsetHistory.length - 1);
+  const toY = (v) => padT + ((axisMax - v) / axisRange) * (h - padT - padB);
+  const toXY = (v, i) => [padL + i * stepX, toY(v)];
   const points = offsetHistory.map((v, i) => toXY(v, i).map((n) => n.toFixed(1)).join(",")).join(" ");
   const [lastX, lastY] = toXY(offsetHistory[offsetHistory.length - 1], offsetHistory.length - 1);
   const last = offsetHistory[offsetHistory.length - 1];
+  const tickCount = Math.round(axisRange / step);
+  let grid = "";
+  for (let t = 0; t <= tickCount; t++) {
+    const v = axisMin + t * step;
+    const isZero = Math.abs(v) < step / 1000;
+    const y = toY(v).toFixed(1);
+    const label = isZero ? "0" : (v > 0 ? "+" : "") + v.toFixed(decimals);
+    grid += `<line x1="${padL}" x2="${w - padR}" y1="${y}" y2="${y}" class="${isZero ? "sparkline-zero" : "sparkline-grid"}" />`;
+    grid += `<text x="${padL - 5}" y="${(Number(y) + 3).toFixed(1)}" text-anchor="end" class="sparkline-tick">${label}</text>`;
+  }
+  const spanSeconds = Math.round(((offsetHistory.length - 1) * POLL_INTERVAL_MS) / 1000);
+  const spanLabel = spanSeconds >= 60 ? `${Math.floor(spanSeconds / 60)}m${spanSeconds % 60 ? ` ${spanSeconds % 60}s` : ""}` : `${spanSeconds}s`;
   el.innerHTML = `
-    <svg viewBox="0 0 ${w} ${h}" class="sparkline-svg" role="img" aria-label="System clock offset over the last few minutes">
+    <svg viewBox="0 0 ${w} ${h}" class="sparkline-svg" role="img" aria-label="System clock offset in milliseconds over the last few minutes">
+      ${grid}
+      <text x="2" y="${padT - 1}" class="sparkline-tick">ms</text>
+      <text x="${padL}" y="${h - 4}" text-anchor="start" class="sparkline-tick">-${spanLabel}</text>
+      <text x="${w - padR}" y="${h - 4}" text-anchor="end" class="sparkline-tick">now</text>
       <polyline points="${points}" class="sparkline-line" />
       <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="4" class="sparkline-dot" />
     </svg>
