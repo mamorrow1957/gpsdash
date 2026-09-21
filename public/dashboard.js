@@ -150,7 +150,7 @@ function niceStep(range) {
 
 function renderOffsetSparkline() {
   const el = document.getElementById("offset-sparkline");
-  if (offsetHistory.length < 2) {
+  if (offsetHistory.length < 1) {
     el.innerHTML = "<p class='muted'>Collecting data…</p>";
     return;
   }
@@ -170,7 +170,8 @@ function renderOffsetSparkline() {
   if (axisMax <= axisMin) axisMax = axisMin + step;
   const axisRange = axisMax - axisMin;
   const decimals = step >= 1 ? 0 : Math.min(3, Math.ceil(-Math.log10(step)));
-  const stepX = (w - padL - padR) / (offsetHistory.length - 1);
+  // Fixed spacing: the trace starts at the left edge and advances one step per poll until the window is full, then scrolls.
+  const stepX = (w - padL - padR) / (MAX_OFFSET_HISTORY - 1);
   const toY = (v) => padT + ((axisMax - v) / axisRange) * (h - padT - padB);
   const toXY = (v, i) => [padL + i * stepX, toY(v)];
   const points = offsetHistory.map((v, i) => toXY(v, i).map((n) => n.toFixed(1)).join(",")).join(" ");
@@ -192,8 +193,8 @@ function renderOffsetSparkline() {
     <svg viewBox="0 0 ${w} ${h}" class="sparkline-svg" role="img" aria-label="System clock offset in milliseconds over the last few minutes">
       ${grid}
       <text x="2" y="${padT - 1}" class="sparkline-tick">ms</text>
-      <text x="${padL}" y="${h - 4}" text-anchor="start" class="sparkline-tick">-${spanLabel}</text>
-      <text x="${w - padR}" y="${h - 4}" text-anchor="end" class="sparkline-tick">now</text>
+      ${spanSeconds > 0 ? `<text x="${padL}" y="${h - 4}" text-anchor="start" class="sparkline-tick">-${spanLabel}</text>` : ""}
+      ${lastX - padL >= 45 ? `<text x="${lastX.toFixed(1)}" y="${h - 4}" text-anchor="end" class="sparkline-tick">now</text>` : ""}
       <polyline points="${points}" class="sparkline-line" />
       <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="4" class="sparkline-dot" />
     </svg>
