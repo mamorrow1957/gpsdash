@@ -187,7 +187,10 @@ function renderOffsetSparkline() {
     grid += `<line x1="${padL}" x2="${w - padR}" y1="${y}" y2="${y}" class="${isZero ? "sparkline-zero" : "sparkline-grid"}" />`;
     grid += `<text x="${padL - 5}" y="${(Number(y) + 3).toFixed(1)}" text-anchor="end" class="sparkline-tick">${label}</text>`;
   }
-  const spanSeconds = Math.round(((offsetHistory.length - 1) * POLL_INTERVAL_MS) / 1000);
+  const spanSeconds =
+    offsetHistory.length >= MAX_OFFSET_HISTORY
+      ? OFFSET_HISTORY_WINDOW_MS / 1000
+      : Math.round(((offsetHistory.length - 1) * POLL_INTERVAL_MS) / 1000);
   const spanLabel = spanSeconds >= 60 ? `${Math.floor(spanSeconds / 60)}m${spanSeconds % 60 ? ` ${spanSeconds % 60}s` : ""}` : `${spanSeconds}s`;
   el.innerHTML = `
     <svg viewBox="0 0 ${w} ${h}" class="sparkline-svg" role="img" aria-label="System clock offset in milliseconds over the last few minutes">
