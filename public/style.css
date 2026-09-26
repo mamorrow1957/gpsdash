@@ -220,6 +220,21 @@ tr.state-rejected {
   height: 7px;
 }
 
+.legend-constellations {
+  margin-top: 0.3rem;
+  font-size: 0.8rem;
+}
+
+.legend-constellations .shape-icon {
+  fill: var(--text-muted);
+  vertical-align: -1px;
+}
+
+.sky-hint {
+  opacity: 0.7;
+  font-size: 0.7rem;
+}
+
 .sky-note {
   text-align: center;
   color: var(--text-muted);

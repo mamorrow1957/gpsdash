@@ -115,43 +115,43 @@ test("the graph keeps 15 minutes of samples", async ({ page }) => {
 // gpsd reports satellites it has no position for as az 0 / el -999. They must not be drawn off the canvas, and the
 // legend must add up to every satellite in the list.
 const SKY_SATELLITES = [
-  { prn: 5, az: 77, el: 21, ss: 33, used: true },
-  { prn: 15, az: 48, el: 69, ss: 27, used: true },
-  { prn: 27, az: 318, el: 12, ss: 25, used: false }, // above the horizon, heard, not used
-  { prn: 46, az: 201, el: 43, ss: 0, used: false }, // above the horizon, no signal
-  { prn: 30, az: 100, el: -5, ss: 0, used: false }, // below the horizon
-  { prn: 193, az: 0, el: -999, ss: 0, used: false }, // gpsd's "no position"
-  { prn: 197, az: 0, el: -999, ss: 0, used: false },
-  { prn: 199, az: null, el: null, ss: null, used: false }, // position missing entirely
+  { prn: 5, az: 77, el: 21, ss: 33, used: true, gnssid: 0, svid: 5 },
+  { prn: 15, az: 48, el: 69, ss: 27, used: true, gnssid: 0, svid: 15 },
+  { prn: 27, az: 318, el: 12, ss: 25, used: false, gnssid: 0, svid: 27 }, // above the horizon, heard, not used
+  { prn: 46, az: 201, el: 43, ss: 0, used: false, gnssid: 1, svid: 133 }, // SBAS, above the horizon, no signal
+  { prn: 30, az: 100, el: -5, ss: 0, used: false, gnssid: 0, svid: 30 }, // below the horizon
+  { prn: 193, az: 0, el: -999, ss: 0, used: false, gnssid: 5, svid: 1 }, // QZSS, gpsd's "no position"
+  { prn: 197, az: 0, el: -999, ss: 0, used: false, gnssid: 5, svid: 4 },
+  { prn: 199, az: null, el: null, ss: null, used: false, gnssid: 5, svid: 6 }, // position missing entirely
 ];
 
 test("sky view legend accounts for every satellite and only plots ones that have a position", async ({ page }) => {
   await stubStatus(page, 0.00002, SKY_SATELLITES);
   await page.goto("/");
   const sky = page.locator("#sky-plot");
-  await expect(sky.locator("svg")).toBeVisible();
-  const legend = sky.locator(".legend");
+  await expect(sky.locator(".sky-svg")).toBeVisible();
+  const legend = sky.locator(".legend-states");
   await expect(legend).toContainText("Used (2)");
   await expect(legend).toContainText("Not used (1)");
   await expect(legend).toContainText("No signal (1)");
   await expect(legend).toContainText("Below horizon (1)");
   await expect(legend).toContainText("No position (3)");
   // 2 + 1 + 1 + 1 + 3 = 8 = every satellite in the list
-  await expect(sky.locator("circle.sky-dot-used")).toHaveCount(2);
-  await expect(sky.locator("circle.sky-dot-unused")).toHaveCount(1);
-  await expect(sky.locator("circle.sky-dot-nosignal")).toHaveCount(1);
-  await expect(sky.locator(".sky-note")).toContainText("No position reported: PRN 193, 197, 199");
-  await expect(sky.locator(".sky-note")).toContainText("Below the horizon: PRN 30");
+  await expect(sky.locator(".sky-dot-used")).toHaveCount(2);
+  await expect(sky.locator(".sky-dot-unused")).toHaveCount(1);
+  await expect(sky.locator(".sky-dot-nosignal")).toHaveCount(1);
+  await expect(sky.locator(".sky-note")).toContainText("No position reported: QZSS 193, 197, 199");
+  await expect(sky.locator(".sky-note")).toContainText("Below the horizon: GPS 30");
 });
 
 test("every plotted satellite dot lies inside the sky view canvas", async ({ page }) => {
   await stubStatus(page, 0.00002, SKY_SATELLITES);
   await page.goto("/");
-  await expect(page.locator("#sky-plot svg")).toBeVisible();
+  await expect(page.locator("#sky-plot .sky-svg")).toBeVisible();
   const outside = await page.evaluate(() => {
-    const svg = document.querySelector("#sky-plot svg");
+    const svg = document.querySelector("#sky-plot .sky-svg");
     const vb = svg.viewBox.baseVal;
-    return [...svg.querySelectorAll("circle.sky-dot-used, circle.sky-dot-unused, circle.sky-dot-nosignal")]
+    return [...svg.querySelectorAll("[class^='sky-dot']")]
       .map((c) => ({ x: +c.getAttribute("cx"), y: +c.getAttribute("cy") }))
       .filter((d) => d.x < 0 || d.x > vb.width || d.y < 0 || d.y > vb.height).length;
   });
@@ -161,10 +161,65 @@ test("every plotted satellite dot lies inside the sky view canvas", async ({ pag
 test("sky view omits the extra legend items when every satellite has a position and a signal", async ({ page }) => {
   await stubStatus(page, 0.00002, SKY_SATELLITES.slice(0, 3));
   await page.goto("/");
-  const legend = page.locator("#sky-plot .legend");
+  const legend = page.locator("#sky-plot .legend-states");
   await expect(legend).toContainText("Used (2)");
   await expect(legend).toContainText("Not used (1)");
   await expect(legend).not.toContainText("No signal");
   await expect(legend).not.toContainText("No position");
   await expect(page.locator("#sky-plot .sky-note")).toHaveCount(0);
+});
+
+// ---- Constellations -----------------------------------------------------------------------
+test("sky view summarises used/listed satellites per constellation and names them in the notes", async ({ page }) => {
+  await stubStatus(page, 0.00002, SKY_SATELLITES);
+  await page.goto("/");
+  const row = page.locator("#sky-plot .legend-constellations");
+  await expect(row).toContainText("GPS 2/4"); // 5, 15 used; 27 not used; 30 below the horizon
+  await expect(row).toContainText("SBAS 0/1");
+  await expect(row).toContainText("QZSS 0/3");
+});
+
+const SHAPE_SATELLITES = [
+  { prn: 5, az: 10, el: 60, ss: 30, used: true, gnssid: 0, svid: 5 }, // GPS
+  { prn: 46, az: 100, el: 40, ss: 0, used: false, gnssid: 1, svid: 133 }, // SBAS
+  { prn: 301, az: 160, el: 50, ss: 28, used: true, gnssid: 2, svid: 1 }, // Galileo
+  { prn: 161, az: 220, el: 30, ss: 27, used: true, gnssid: 3, svid: 1 }, // BeiDou
+  { prn: 194, az: 280, el: 20, ss: 22, used: false, gnssid: 5, svid: 2 }, // QZSS
+  { prn: 70, az: 330, el: 45, ss: 26, used: true, gnssid: 6, svid: 5 }, // GLONASS
+];
+
+test("each constellation gets its own marker shape and a tooltip naming it", async ({ page }) => {
+  await stubStatus(page, 0.00002, SHAPE_SATELLITES);
+  await page.goto("/");
+  await expect(page.locator("#sky-plot .sky-svg")).toBeVisible();
+  const shapes = await page.evaluate(() => {
+    const out = {};
+    for (const m of document.querySelectorAll("#sky-plot .sky-svg [class^='sky-dot']")) {
+      const title = m.querySelector("title").textContent;
+      const name = title.split(" · ")[0];
+      const vertices = m.tagName === "polygon" ? m.getAttribute("points").trim().split(/\s+/).length : null;
+      out[name] = { tag: m.tagName, vertices, title };
+    }
+    return out;
+  });
+  expect(shapes.GPS).toMatchObject({ tag: "circle" });
+  expect(shapes.SBAS).toMatchObject({ tag: "rect" });
+  expect(shapes.QZSS).toMatchObject({ tag: "polygon", vertices: 4 }); // diamond
+  expect(shapes.GLONASS).toMatchObject({ tag: "polygon", vertices: 3 }); // triangle
+  expect(shapes.Galileo).toMatchObject({ tag: "polygon", vertices: 3 }); // inverted triangle
+  expect(shapes.BeiDou).toMatchObject({ tag: "polygon", vertices: 6 }); // hexagon
+  expect(shapes.SBAS.title).toContain("PRN 46 (sv 133)");
+  expect(shapes.GPS.title).not.toContain("(sv"); // svid equals PRN for GPS
+});
+
+test("without constellation data (older agent) the sky view falls back to plain PRNs and circles", async ({ page }) => {
+  const legacy = SKY_SATELLITES.map(({ gnssid, svid, ...rest }) => rest);
+  await stubStatus(page, 0.00002, legacy);
+  await page.goto("/");
+  const sky = page.locator("#sky-plot");
+  await expect(sky.locator(".sky-svg")).toBeVisible();
+  await expect(sky.locator(".legend-constellations")).toHaveCount(0);
+  await expect(sky.locator(".sky-note")).toContainText("No position reported: PRN 193, 197, 199");
+  const tags = await page.evaluate(() => [...document.querySelectorAll("#sky-plot .sky-svg [class^='sky-dot']")].map((m) => m.tagName));
+  expect([...new Set(tags)]).toEqual(["circle"]);
 });

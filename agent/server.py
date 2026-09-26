@@ -128,6 +128,10 @@ def get_gps_fix():
                         "el": s.get("el"),
                         "ss": s.get("ss"),
                         "used": bool(s.get("used")),
+                        # constellation (gpsd gnssid: 0 GPS, 1 SBAS, 2 Galileo, 3 BeiDou, 4 IMES, 5 QZSS, 6 GLONASS,
+                        # 7 NavIC) and the satellite number within it; None on older gpsd versions
+                        "gnssid": s.get("gnssid"),
+                        "svid": s.get("svid"),
                     }
                     for s in sats
                 ]

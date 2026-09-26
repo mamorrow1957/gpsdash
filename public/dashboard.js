@@ -118,6 +118,63 @@ function renderSources(sources) {
 
 const SKY_SIZE = 220;
 
+// Constellations, from gpsd's gnssid. The marker SHAPE identifies the constellation; colour stays reserved for the
+// satellite's state (used / not used / no signal), so the two never compete.
+const CONSTELLATIONS = {
+  0: { name: "GPS", shape: "circle" },
+  1: { name: "SBAS", shape: "square" },
+  2: { name: "Galileo", shape: "triangle-down" },
+  3: { name: "BeiDou", shape: "hexagon" },
+  4: { name: "IMES", shape: "pentagon" },
+  5: { name: "QZSS", shape: "diamond" },
+  6: { name: "GLONASS", shape: "triangle" },
+  7: { name: "NavIC", shape: "plus" },
+};
+const UNKNOWN_CONSTELLATION = { name: null, shape: "circle" }; // older agent, or a gnssid we don't know
+
+function constellationOf(s) {
+  return CONSTELLATIONS[s.gnssid] || UNKNOWN_CONSTELLATION;
+}
+
+// Corners of a regular n-gon around (cx, cy); rotDeg 0 puts one corner straight up.
+function polygonPoints(cx, cy, r, n, rotDeg) {
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    const a = ((rotDeg + (360 / n) * i) * Math.PI) / 180;
+    pts.push(`${(cx + r * Math.sin(a)).toFixed(1)},${(cy - r * Math.cos(a)).toFixed(1)}`);
+  }
+  return pts.join(" ");
+}
+
+// One marker, centred on (x, y). Sizes are tuned so every shape has a similar visual weight.
+function shapeMarkup(shape, x, y, size, attrs, inner = "") {
+  const poly = (points) => `<polygon points="${points}" ${attrs}>${inner}</polygon>`;
+  switch (shape) {
+    case "square": {
+      const half = size * 0.9;
+      return `<rect x="${(x - half).toFixed(1)}" y="${(y - half).toFixed(1)}" width="${(half * 2).toFixed(1)}" height="${(half * 2).toFixed(1)}" ${attrs}>${inner}</rect>`;
+    }
+    case "diamond":
+      return poly(polygonPoints(x, y, size * 1.28, 4, 0));
+    case "triangle":
+      return poly(polygonPoints(x, y, size * 1.55, 3, 0));
+    case "triangle-down":
+      return poly(polygonPoints(x, y, size * 1.55, 3, 180));
+    case "hexagon":
+      return poly(polygonPoints(x, y, size * 1.11, 6, 0));
+    case "pentagon":
+      return poly(polygonPoints(x, y, size * 1.16, 5, 0));
+    case "plus": {
+      const a = size * 0.45;
+      const b = size * 1.3;
+      const pts = [[-a, -b], [a, -b], [a, -a], [b, -a], [b, a], [a, a], [a, b], [-a, b], [-a, a], [-b, a], [-b, -a], [-a, -a]];
+      return poly(pts.map(([dx, dy]) => `${(x + dx).toFixed(1)},${(y + dy).toFixed(1)}`).join(" "));
+    }
+    default:
+      return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${size}" ${attrs}>${inner}</circle>`;
+  }
+}
+
 // Sort satellites into the groups the plot and legend show, so the legend always adds up to the total.
 //  - used:       in the position fix
 //  - unused:     above the horizon, signal heard, but not used in the fix
@@ -138,8 +195,35 @@ function classifySatellites(satellites) {
   return g;
 }
 
-function prnList(sats) {
-  return sats.map((s) => s.prn).join(", ");
+// "QZSS 193, 194; PRN 12": PRNs grouped under their constellation name (or plain "PRN" when the constellation is unknown).
+function describeSatellites(sats) {
+  const groups = new Map();
+  for (const s of sats) {
+    const key = constellationOf(s).name || "PRN";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(s.prn);
+  }
+  return [...groups].map(([key, prns]) => `${key} ${prns.join(", ")}`).join("; ");
+}
+
+// One line under the legend: how many satellites of each constellation are used, out of those listed.
+function constellationSummary(satellites) {
+  if (!satellites.some((s) => CONSTELLATIONS[s.gnssid])) return "";
+  const byId = new Map();
+  for (const s of satellites) {
+    const id = CONSTELLATIONS[s.gnssid] ? s.gnssid : 99;
+    const entry = byId.get(id) || { c: CONSTELLATIONS[id] || { name: "Other", shape: "circle" }, total: 0, used: 0 };
+    entry.total += 1;
+    if (s.used) entry.used += 1;
+    byId.set(id, entry);
+  }
+  const items = [...byId.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(
+      ([, e]) =>
+        `<span title="${e.used} of ${e.total} used in the fix"><svg class="shape-icon" viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">${shapeMarkup(e.c.shape, 6, 6, 4, "")}</svg> ${e.c.name} ${e.used}/${e.total}</span>`
+    );
+  return `<div class="legend legend-constellations" aria-label="Satellites by constellation, used out of listed">${items.join("")}<span class="sky-hint">used / listed</span></div>`;
 }
 
 function renderSkyPlot(satellites) {
@@ -161,8 +245,12 @@ function renderSkyPlot(satellites) {
     const azRad = (s.az * Math.PI) / 180;
     const x = cx + radius * Math.sin(azRad);
     const y = cy - radius * Math.cos(azRad);
+    const c = constellationOf(s);
     const snr = s.ss !== null && s.ss !== undefined && s.ss > 0 ? `${s.ss.toFixed(0)} dB` : "no signal";
-    return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="5" class="${cls}"><title>PRN ${s.prn} · el ${s.el.toFixed(0)}° · az ${s.az.toFixed(0)}° · ${snr}${s.used ? " · used in fix" : ""}</title></circle>`;
+    const svid = s.svid !== undefined && s.svid !== null && s.svid !== s.prn ? ` (sv ${s.svid})` : "";
+    const who = c.name ? `${c.name} · PRN ${s.prn}${svid}` : `PRN ${s.prn}`;
+    const title = `<title>${who} · el ${s.el.toFixed(0)}° · az ${s.az.toFixed(0)}° · ${snr}${s.used ? " · used in fix" : ""}</title>`;
+    return shapeMarkup(c.shape, x, y, 5, `class="${cls}"`, title);
   };
   // Not-used dots go underneath the used ones, so a used satellite is never hidden behind a grey one.
   const dots =
@@ -171,8 +259,8 @@ function renderSkyPlot(satellites) {
     groups.used.map((s) => dotFor(s, "sky-dot-used")).join("");
   const legendItem = (cls, label, sats) => `<span><i class="dot ${cls}"></i> ${label} (${sats.length})</span>`;
   const notes = [];
-  if (groups.noPosition.length) notes.push(`No position reported: PRN ${prnList(groups.noPosition)}`);
-  if (groups.below.length) notes.push(`Below the horizon: PRN ${prnList(groups.below)}`);
+  if (groups.noPosition.length) notes.push(`No position reported: ${describeSatellites(groups.noPosition)}`);
+  if (groups.below.length) notes.push(`Below the horizon: ${describeSatellites(groups.below)}`);
   el.innerHTML = `
     <svg viewBox="0 0 ${SKY_SIZE} ${SKY_SIZE}" class="sky-svg" role="img" aria-label="Satellite sky view, North at top">
       <circle cx="${cx}" cy="${cy}" r="${r}" class="sky-horizon" />
@@ -183,13 +271,14 @@ function renderSkyPlot(satellites) {
       <text x="4" y="${cy + 4}" class="sky-label" text-anchor="start">W</text>
       ${dots}
     </svg>
-    <div class="legend">
+    <div class="legend legend-states">
       ${legendItem("dot-used", "Used", groups.used)}
       ${legendItem("dot-unused", "Not used", groups.unused)}
       ${groups.noSignal.length ? legendItem("dot-nosignal", "No signal", groups.noSignal) : ""}
       ${groups.below.length ? legendItem("dot-below", "Below horizon", groups.below) : ""}
       ${groups.noPosition.length ? legendItem("dot-noposition", "No position", groups.noPosition) : ""}
     </div>
+    ${constellationSummary(satellites)}
     ${notes.length ? `<div class="sky-note">${notes.join(" · ")}</div>` : ""}
   `;
 }
