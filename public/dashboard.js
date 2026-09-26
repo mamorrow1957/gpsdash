@@ -9,12 +9,13 @@ const FIX_MODE_LABELS = { 0: "Unknown", 1: "No fix", 2: "2D fix", 3: "3D fix" };
 const offsetHistory = []; // offsets in ms, oldest first
 const offsetTimes = []; // poll timestamps (ms since epoch), parallel to offsetHistory
 
-// Graph view options, remembered per browser: symmetric-log value axis and log-spaced time axis.
-const graphMode = { yLog: true, tLog: true };
+// Graph view options, remembered per browser. Defaults: log-spaced time axis, linear value axis
+// (a symmetric-log value axis is available with the "Value" toggle).
+const graphMode = { yLog: false, tLog: true };
 try {
   const saved = JSON.parse(localStorage.getItem("gpsdash.graphMode") || "null");
   if (saved) {
-    graphMode.yLog = saved.yLog !== false;
+    graphMode.yLog = saved.yLog === true;
     graphMode.tLog = saved.tLog !== false;
   }
 } catch (e) {
@@ -309,7 +310,10 @@ function renderOffsetSparkline() {
   const min = Math.min(...offsetHistory);
   const max = Math.max(...offsetHistory);
   const u = pickUnit(Math.max(Math.abs(min), Math.abs(max), Math.abs(last)));
-  const num = (ms) => (ms * u.k).toFixed(1);
+  const num = (ms) => {
+    const t = (ms * u.k).toFixed(1);
+    return t === "-0.0" ? "0.0" : t; // avoid a negative zero in the caption
+  };
   const aria =
     `System clock offset over the last ${xAxis.spanText}; ` +
     `value axis ${graphMode.yLog ? "logarithmic" : "linear"}, time axis ${graphMode.tLog ? "logarithmic" : "linear"}`;

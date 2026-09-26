@@ -43,43 +43,46 @@ async function stubStatus(page, offsetSeconds) {
   );
 }
 
-test("offset graph defaults to log scales with decade ticks and a 15 minute time axis", async ({ page }) => {
+test("offset graph defaults to a linear value axis and a log time axis over 15 minutes", async ({ page }) => {
   await stubStatus(page, 0.00002); // 20 µs
   await page.goto("/");
   const graph = page.locator("#offset-sparkline");
   await expect(graph.locator("svg")).toBeVisible();
-  await expect(page.locator("#toggle-y")).toHaveText("Value: log");
+  await expect(page.locator("#toggle-y")).toHaveText("Value: linear");
+  await expect(page.locator("#toggle-y")).toHaveAttribute("aria-pressed", "false");
   await expect(page.locator("#toggle-t")).toHaveText("Time: log");
-  await expect(graph.locator("text", { hasText: "+100µs" })).toBeVisible();
-  await expect(graph.locator("text", { hasText: "-100µs" })).toBeVisible();
+  await expect(page.locator("#toggle-t")).toHaveAttribute("aria-pressed", "true");
   await expect(graph.locator("text", { hasText: "-15m" })).toBeVisible();
   await expect(graph.locator("text", { hasText: "now" })).toBeVisible();
+  await expect(graph.locator("text", { hasText: "µs" })).toHaveCount(0); // linear ticks carry no unit
   await expect(graph.locator(".sparkline-caption")).toContainText("20.0 µs now");
 });
 
-test("the value axis follows the size of the offset (a few ms zooms out to decades of ms)", async ({ page }) => {
-  await stubStatus(page, 0.0031); // 3.1 ms
-  await page.goto("/");
-  const graph = page.locator("#offset-sparkline");
-  await expect(graph.locator("text", { hasText: "+10ms" })).toBeVisible();
-  await expect(graph.locator(".sparkline-caption")).toContainText("3.1 ms now");
-});
-
-test("value toggle switches to a linear axis and the choice survives a reload", async ({ page }) => {
-  await stubStatus(page, 0.0031);
+test("value toggle switches to a symmetric-log axis and the choice survives a reload", async ({ page }) => {
+  await stubStatus(page, 0.00002); // 20 µs
   await page.goto("/");
   const graph = page.locator("#offset-sparkline");
   await expect(graph.locator("svg")).toBeVisible();
   await page.locator("#toggle-y").click();
-  await expect(page.locator("#toggle-y")).toHaveText("Value: linear");
-  await expect(page.locator("#toggle-y")).toHaveAttribute("aria-pressed", "false");
-  await expect(graph.locator("text", { hasText: "µs" })).toHaveCount(0);
+  await expect(page.locator("#toggle-y")).toHaveText("Value: log");
+  await expect(page.locator("#toggle-y")).toHaveAttribute("aria-pressed", "true");
+  await expect(graph.locator("text", { hasText: "+100µs" })).toBeVisible();
+  await expect(graph.locator("text", { hasText: "-100µs" })).toBeVisible();
   await page.reload();
-  await expect(page.locator("#toggle-y")).toHaveText("Value: linear");
+  await expect(page.locator("#toggle-y")).toHaveText("Value: log");
   await expect(page.locator("#toggle-t")).toHaveText("Time: log");
 });
 
-test("time toggle switches to the linear (fill left to right) axis", async ({ page }) => {
+test("the log value axis follows the size of the offset (a few ms zooms out to decades of ms)", async ({ page }) => {
+  await stubStatus(page, 0.0031); // 3.1 ms
+  await page.goto("/");
+  await expect(page.locator("#offset-sparkline svg")).toBeVisible();
+  await page.locator("#toggle-y").click();
+  await expect(page.locator("#offset-sparkline text", { hasText: "+10ms" })).toBeVisible();
+  await expect(page.locator("#offset-sparkline .sparkline-caption")).toContainText("3.1 ms now");
+});
+
+test("time toggle switches to the linear (fill left to right) axis and the choice survives a reload", async ({ page }) => {
   await stubStatus(page, 0.00002);
   await page.goto("/");
   const graph = page.locator("#offset-sparkline");
@@ -87,6 +90,9 @@ test("time toggle switches to the linear (fill left to right) axis", async ({ pa
   await page.locator("#toggle-t").click();
   await expect(page.locator("#toggle-t")).toHaveText("Time: linear");
   await expect(graph.locator("text", { hasText: "-15m" })).toHaveCount(0);
+  await page.reload();
+  await expect(page.locator("#toggle-t")).toHaveText("Time: linear");
+  await expect(page.locator("#toggle-y")).toHaveText("Value: linear");
 });
 
 test("the graph keeps 15 minutes of samples", async ({ page }) => {
