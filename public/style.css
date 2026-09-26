@@ -157,16 +157,16 @@ tr.state-rejected {
 }
 
 .sky-dot-used {
-  fill: var(--series-1);
+  fill: var(--sat, var(--series-1));
   stroke: #161b22;
   stroke-width: 2;
 }
 
 .sky-dot-unused {
-  fill: var(--text-muted);
-  stroke: #161b22;
-  stroke-width: 2;
-  opacity: 0.6;
+  fill: var(--sat, var(--text-muted));
+  fill-opacity: 0.32;
+  stroke: var(--sat, var(--text-muted));
+  stroke-width: 1.5;
 }
 
 .legend {
@@ -188,27 +188,28 @@ tr.state-rejected {
 }
 
 .dot-used {
-  background: var(--series-1);
+  background: #b6bec9;
 }
 
 .dot-unused {
-  background: var(--text-muted);
-  opacity: 0.6;
+  background: rgba(182, 190, 201, 0.32);
+  border: 1.5px solid #b6bec9;
+  width: 7px;
+  height: 7px;
 }
 
 .sky-dot-nosignal {
   fill: none;
-  stroke: var(--text-muted);
+  stroke: var(--sat, var(--text-muted));
   stroke-width: 1.5;
-  opacity: 0.8;
+  stroke-dasharray: 2.5 2;
 }
 
 .legend .dot-nosignal {
   background: transparent;
-  border: 1.5px solid var(--text-muted);
+  border: 1.5px dotted #b6bec9;
   width: 7px;
   height: 7px;
-  opacity: 0.8;
 }
 
 /* satellites that cannot be placed on the plot get a dashed outline in the legend */
@@ -223,11 +224,6 @@ tr.state-rejected {
 .legend-constellations {
   margin-top: 0.3rem;
   font-size: 0.8rem;
-}
-
-.legend-constellations .shape-icon {
-  fill: var(--text-muted);
-  vertical-align: -1px;
 }
 
 .sky-hint {

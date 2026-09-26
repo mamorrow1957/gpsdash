@@ -118,19 +118,20 @@ function renderSources(sources) {
 
 const SKY_SIZE = 220;
 
-// Constellations, from gpsd's gnssid. The marker SHAPE identifies the constellation; colour stays reserved for the
-// satellite's state (used / not used / no signal), so the two never compete.
+// Constellations, from gpsd's gnssid. Each is identified TWICE, by a COLOUR and by a marker SHAPE, so it stays legible
+// without colour vision; the satellite's STATE is shown by the fill style instead:
+// solid = used in the fix, translucent = signal heard but not used, dashed ring = no signal.
 const CONSTELLATIONS = {
-  0: { name: "GPS", shape: "circle" },
-  1: { name: "SBAS", shape: "square" },
-  2: { name: "Galileo", shape: "triangle-down" },
-  3: { name: "BeiDou", shape: "hexagon" },
-  4: { name: "IMES", shape: "pentagon" },
-  5: { name: "QZSS", shape: "diamond" },
-  6: { name: "GLONASS", shape: "triangle" },
-  7: { name: "NavIC", shape: "plus" },
+  0: { name: "GPS", color: "#3987e5", shape: "circle" },
+  1: { name: "SBAS", color: "#f0e442", shape: "square" },
+  2: { name: "Galileo", color: "#00b58a", shape: "triangle-down" },
+  3: { name: "BeiDou", color: "#ee6a2c", shape: "hexagon" },
+  4: { name: "IMES", color: "#b0b0b0", shape: "pentagon" },
+  5: { name: "QZSS", color: "#cc79a7", shape: "diamond" },
+  6: { name: "GLONASS", color: "#e69f00", shape: "triangle" },
+  7: { name: "NavIC", color: "#56b4e9", shape: "plus" },
 };
-const UNKNOWN_CONSTELLATION = { name: null, shape: "circle" }; // older agent, or a gnssid we don't know
+const UNKNOWN_CONSTELLATION = { name: null, color: "#8b98a5", shape: "circle" }; // older agent, or a gnssid we don't know
 
 function constellationOf(s) {
   return CONSTELLATIONS[s.gnssid] || UNKNOWN_CONSTELLATION;
@@ -212,7 +213,7 @@ function constellationSummary(satellites) {
   const byId = new Map();
   for (const s of satellites) {
     const id = CONSTELLATIONS[s.gnssid] ? s.gnssid : 99;
-    const entry = byId.get(id) || { c: CONSTELLATIONS[id] || { name: "Other", shape: "circle" }, total: 0, used: 0 };
+    const entry = byId.get(id) || { c: CONSTELLATIONS[id] || { name: "Other", color: UNKNOWN_CONSTELLATION.color, shape: "circle" }, total: 0, used: 0 };
     entry.total += 1;
     if (s.used) entry.used += 1;
     byId.set(id, entry);
@@ -221,7 +222,7 @@ function constellationSummary(satellites) {
     .sort((a, b) => a[0] - b[0])
     .map(
       ([, e]) =>
-        `<span title="${e.used} of ${e.total} used in the fix"><svg class="shape-icon" viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">${shapeMarkup(e.c.shape, 6, 6, 4, "")}</svg> ${e.c.name} ${e.used}/${e.total}</span>`
+        `<span title="${e.used} of ${e.total} used in the fix"><svg class="shape-icon" viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">${shapeMarkup(e.c.shape, 6, 6, 4, `style="fill:${e.c.color}"`)}</svg> ${e.c.name} ${e.used}/${e.total}</span>`
     );
   return `<div class="legend legend-constellations" aria-label="Satellites by constellation, used out of listed">${items.join("")}<span class="sky-hint">used / listed</span></div>`;
 }
@@ -250,7 +251,7 @@ function renderSkyPlot(satellites) {
     const svid = s.svid !== undefined && s.svid !== null && s.svid !== s.prn ? ` (sv ${s.svid})` : "";
     const who = c.name ? `${c.name} · PRN ${s.prn}${svid}` : `PRN ${s.prn}`;
     const title = `<title>${who} · el ${s.el.toFixed(0)}° · az ${s.az.toFixed(0)}° · ${snr}${s.used ? " · used in fix" : ""}</title>`;
-    return shapeMarkup(c.shape, x, y, 5, `class="${cls}"`, title);
+    return shapeMarkup(c.shape, x, y, 5, `class="${cls}" style="--sat:${c.color}"`, title);
   };
   // Not-used dots go underneath the used ones, so a used satellite is never hidden behind a grey one.
   const dots =

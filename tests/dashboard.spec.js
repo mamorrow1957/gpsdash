@@ -188,28 +188,37 @@ const SHAPE_SATELLITES = [
   { prn: 70, az: 330, el: 45, ss: 26, used: true, gnssid: 6, svid: 5 }, // GLONASS
 ];
 
-test("each constellation gets its own marker shape and a tooltip naming it", async ({ page }) => {
+test("each constellation gets its own shape AND colour, and a tooltip naming it", async ({ page }) => {
   await stubStatus(page, 0.00002, SHAPE_SATELLITES);
   await page.goto("/");
   await expect(page.locator("#sky-plot .sky-svg")).toBeVisible();
-  const shapes = await page.evaluate(() => {
+  const marks = await page.evaluate(() => {
     const out = {};
     for (const m of document.querySelectorAll("#sky-plot .sky-svg [class^='sky-dot']")) {
       const title = m.querySelector("title").textContent;
-      const name = title.split(" · ")[0];
       const vertices = m.tagName === "polygon" ? m.getAttribute("points").trim().split(/\s+/).length : null;
-      out[name] = { tag: m.tagName, vertices, title };
+      out[title.split(" · ")[0]] = { tag: m.tagName, vertices, colour: m.style.getPropertyValue("--sat"), state: m.getAttribute("class"), title };
     }
     return out;
   });
-  expect(shapes.GPS).toMatchObject({ tag: "circle" });
-  expect(shapes.SBAS).toMatchObject({ tag: "rect" });
-  expect(shapes.QZSS).toMatchObject({ tag: "polygon", vertices: 4 }); // diamond
-  expect(shapes.GLONASS).toMatchObject({ tag: "polygon", vertices: 3 }); // triangle
-  expect(shapes.Galileo).toMatchObject({ tag: "polygon", vertices: 3 }); // inverted triangle
-  expect(shapes.BeiDou).toMatchObject({ tag: "polygon", vertices: 6 }); // hexagon
-  expect(shapes.SBAS.title).toContain("PRN 46 (sv 133)");
-  expect(shapes.GPS.title).not.toContain("(sv"); // svid equals PRN for GPS
+  // shape identifies the constellation...
+  expect(marks.GPS).toMatchObject({ tag: "circle" });
+  expect(marks.SBAS).toMatchObject({ tag: "rect" });
+  expect(marks.QZSS).toMatchObject({ tag: "polygon", vertices: 4 }); // diamond
+  expect(marks.GLONASS).toMatchObject({ tag: "polygon", vertices: 3 }); // triangle
+  expect(marks.Galileo).toMatchObject({ tag: "polygon", vertices: 3 }); // inverted triangle
+  expect(marks.BeiDou).toMatchObject({ tag: "polygon", vertices: 6 }); // hexagon
+  // ...and so does colour: six constellations -> six distinct colours
+  expect(new Set(Object.values(marks).map((m) => m.colour)).size).toBe(6);
+  expect(marks.GPS.colour).toBe("#3987e5");
+  expect(marks.SBAS.colour).toBe("#f0e442");
+  expect(marks.QZSS.colour).toBe("#cc79a7");
+  // state is carried by the fill style, not the colour or shape
+  expect(marks.GPS.state).toBe("sky-dot-used");
+  expect(marks.SBAS.state).toBe("sky-dot-nosignal");
+  expect(marks.QZSS.state).toBe("sky-dot-unused");
+  expect(marks.SBAS.title).toContain("PRN 46 (sv 133)");
+  expect(marks.GPS.title).not.toContain("(sv"); // svid equals PRN for GPS
 });
 
 test("without constellation data (older agent) the sky view falls back to plain PRNs and circles", async ({ page }) => {
