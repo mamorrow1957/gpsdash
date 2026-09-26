@@ -9,6 +9,30 @@ const FIX_MODE_LABELS = { 0: "Unknown", 1: "No fix", 2: "2D fix", 3: "3D fix" };
 const offsetHistory = []; // offsets in ms, oldest first
 const offsetTimes = []; // poll timestamps (ms since epoch), parallel to offsetHistory
 
+// The server owns the offset history (so a reload shows the whole window at once, and every viewer sees the same one);
+// the page only keeps a copy to draw. Each poll sends the newest sample we hold (historySeq) and the server run it came
+// from (historyEpoch), and gets back only the newer samples.
+let historySeq = 0;
+let historyEpoch = null;
+
+function applyHistory(h) {
+  if (h.reset) {
+    offsetHistory.length = 0;
+    offsetTimes.length = 0;
+  }
+  const now = Date.now();
+  for (const sample of h.samples) {
+    offsetHistory.push(sample.offsetMs);
+    offsetTimes.push(now - sample.ageMs); // the server sends ages, so its clock and ours never get mixed
+  }
+  while (offsetHistory.length > MAX_OFFSET_HISTORY) {
+    offsetHistory.shift();
+    offsetTimes.shift();
+  }
+  historySeq = h.seq;
+  historyEpoch = h.epoch;
+}
+
 // Graph view options, remembered per browser. Defaults: log-spaced time axis, linear value axis
 // (a symmetric-log value axis is available with the "Value" toggle).
 const graphMode = { yLog: false, tLog: true };
@@ -481,7 +505,7 @@ async function poll() {
   polling = true;
   const banner = document.getElementById("error-banner");
   try {
-    const res = await fetch("/api/status");
+    const res = await fetch(`/api/status?since=${historySeq}&epoch=${historyEpoch === null ? "" : historyEpoch}`);
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "unknown error");
     banner.hidden = true;
@@ -489,14 +513,7 @@ async function poll() {
     renderNtp(data.ntp, data.sources);
     renderSources(data.sources);
     renderSkyPlot(data.gps && data.gps.satellites);
-    if (data.ntp && data.ntp.system_offset_seconds !== undefined) {
-      offsetHistory.push(data.ntp.system_offset_seconds * 1000);
-      offsetTimes.push(Date.now());
-      if (offsetHistory.length > MAX_OFFSET_HISTORY) {
-        offsetHistory.shift();
-        offsetTimes.shift();
-      }
-    }
+    if (data.history) applyHistory(data.history); // the server keeps the offset history; the page only draws it
     renderOffsetSparkline();
   } catch (err) {
     banner.textContent = `Could not load status: ${err.message}`;
