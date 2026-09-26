@@ -15,7 +15,7 @@ const agentTimeoutMs = 5000;
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS) || 2000;
 const HISTORY_WINDOW_MS = Number(process.env.HISTORY_WINDOW_MS) || 15 * 60 * 1000;
 const MAX_HISTORY = Math.max(1, Math.round(HISTORY_WINDOW_MS / POLL_INTERVAL_MS));
-const STALE_AFTER_MS = 3 * POLL_INTERVAL_MS;
+const CACHE_MAX_AGE_MS = 3 * POLL_INTERVAL_MS;
 
 const epoch = Date.now(); // identifies this server run: a client holding an older epoch must discard its history
 let seq = 0; // number of samples ever recorded; each sample gets the next number
@@ -37,16 +37,13 @@ function historyFilePath() {
 }
 const HISTORY_FILE = historyFilePath();
 const SAVE_INTERVAL_MS = Number(process.env.HISTORY_SAVE_INTERVAL_MS) || 30000;
-// Restored samples are flagged `stale` (the page draws them as a yellow line) when the newest one is older than this: a restart that
-// takes a few seconds is invisible, an outage of minutes or hours is shown as such.
-const RESTORED_STALE_AFTER_MS = Number(process.env.HISTORY_STALE_AFTER_MS) || 60000;
 let dirty = false; // samples recorded since the last save
 let saveErrorLogged = false;
 
-// Samples are stored with absolute timestamps, so after a restart their ages (and the gap while the server was down)
-// come out right. Old samples are KEPT, however old: after an outage the graph is still fully populated, and the samples
-// restored from disk are flagged stale so the page can show which part is old. Only invalid samples and ones stamped in
-// the future (a clock that was stepped) are dropped, and the buffer's capacity keeps the newest MAX_HISTORY.
+// Samples are stored with absolute timestamps, so after a restart their ages (and any gap while nothing was being
+// recorded) come out right. Saved samples are KEPT, however old, so the graph is still fully populated after a restart
+// or a long outage. Only invalid samples and ones stamped in the future (a clock that was stepped) are dropped, and
+// the buffer's capacity keeps the newest MAX_HISTORY.
 function loadHistory() {
   if (!HISTORY_FILE) {
     console.log("history persistence is off");
@@ -69,16 +66,11 @@ function loadHistory() {
     console.log(`saved history in ${HISTORY_FILE} was empty`);
     return;
   }
-  const newestAgeMs = now - kept[kept.length - 1].t;
-  const stale = newestAgeMs > RESTORED_STALE_AFTER_MS;
   for (const x of kept) {
     seq += 1;
-    history.push({ seq, t: x.t, offsetMs: x.offsetMs, stale });
+    history.push({ seq, t: x.t, offsetMs: x.offsetMs });
   }
-  console.log(
-    `restored ${kept.length} history samples from ${HISTORY_FILE} (newest ${Math.round(newestAgeMs / 1000)} s old` +
-      `${stale ? ", marked stale" : ""})`
-  );
+  console.log(`restored ${kept.length} history samples from ${HISTORY_FILE} (newest ${Math.round((now - kept[kept.length - 1].t) / 1000)} s old)`);
 }
 
 // Written to a temporary file first and renamed into place, so a crash mid-write never leaves a half-written file.
@@ -123,7 +115,7 @@ async function pollAgent() {
     const offsetSeconds = data && data.ntp && data.ntp.system_offset_seconds;
     if (typeof offsetSeconds === "number") {
       seq += 1;
-      history.push({ seq, t: now, offsetMs: offsetSeconds * 1000, stale: false });
+      history.push({ seq, t: now, offsetMs: offsetSeconds * 1000 });
       while (history.length > MAX_HISTORY) history.shift();
       dirty = true;
     }
@@ -150,9 +142,7 @@ function historySince(since, clientEpoch) {
     epoch,
     seq,
     reset,
-    samples: history
-      .filter((s) => s.seq > from)
-      .map((s) => ({ seq: s.seq, ageMs: now - s.t, offsetMs: s.offsetMs, stale: s.stale })),
+    samples: history.filter((s) => s.seq > from).map((s) => ({ seq: s.seq, ageMs: now - s.t, offsetMs: s.offsetMs })),
   };
 }
 
@@ -180,14 +170,17 @@ app.get("/api/history", (req, res) => {
 
 // The latest agent status. With ?since=<seq>&epoch=<epoch> the reply also carries the clock-offset samples recorded
 // after that point ({history: {epoch, seq, reset, samples}}); ?since=0 returns the whole buffer. Without `since`
-// the reply is the plain agent status, as before.
+// the reply is the plain agent status, as before. While the agent is unreachable the 502 reply carries `history` too.
 app.get("/api/status", async (req, res) => {
   res.set("Cache-Control", "no-store");
-  if (!latest || Date.now() - latest.at > STALE_AFTER_MS) {
+  if (!latest || Date.now() - latest.at > CACHE_MAX_AGE_MS) {
     await refresh();
   }
-  if (!latest || Date.now() - latest.at > STALE_AFTER_MS) {
-    res.status(502).json({ error: `could not reach ntp.local agent: ${lastError || "no recent data"}` });
+  if (!latest || Date.now() - latest.at > CACHE_MAX_AGE_MS) {
+    // The history is still worth sending: the page draws what it has and marks the stretch with no data.
+    const body = { error: `could not reach ntp.local agent: ${lastError || "no recent data"}` };
+    if (req.query.since !== undefined) body.history = historySince(Number(req.query.since), req.query.epoch);
+    res.status(502).json(body);
     return;
   }
   if (req.query.since === undefined) {

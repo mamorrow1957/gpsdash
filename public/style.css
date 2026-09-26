@@ -271,20 +271,13 @@ tr.state-rejected {
   stroke-linecap: round;
 }
 
-/* data the server restored from disk after a restart: a solid yellow line until fresh data pushes it out */
-.sparkline-line-stale {
+/* stretches with no data from the source: a solid yellow line (a bridge over a gap, or the last value held while silent) */
+.sparkline-line-gap {
   fill: none;
   stroke: var(--series-stale);
   stroke-width: 2;
   stroke-linejoin: round;
   stroke-linecap: round;
-}
-
-.sparkline-break {
-  stroke: var(--text-muted);
-  stroke-width: 1;
-  stroke-dasharray: 1 3;
-  opacity: 0.7;
 }
 
 .sparkline-dot-stale {

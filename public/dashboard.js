@@ -8,7 +8,6 @@ const FIX_MODE_LABELS = { 0: "Unknown", 1: "No fix", 2: "2D fix", 3: "3D fix" };
 
 const offsetHistory = []; // offsets in ms, oldest first
 const offsetTimes = []; // poll timestamps (ms since epoch), parallel to offsetHistory
-const offsetStale = []; // parallel: true for samples the server restored from disk after a restart (drawn as a solid yellow line)
 
 // The server owns the offset history (so a reload shows the whole window at once, and every viewer sees the same one);
 // the page only keeps a copy to draw. Each poll sends the newest sample we hold (historySeq) and the server run it came
@@ -20,18 +19,15 @@ function applyHistory(h) {
   if (h.reset) {
     offsetHistory.length = 0;
     offsetTimes.length = 0;
-    offsetStale.length = 0;
   }
   const now = Date.now();
   for (const sample of h.samples) {
     offsetHistory.push(sample.offsetMs);
     offsetTimes.push(now - sample.ageMs); // the server sends ages, so its clock and ours never get mixed
-    offsetStale.push(Boolean(sample.stale));
   }
   while (offsetHistory.length > MAX_OFFSET_HISTORY) {
     offsetHistory.shift();
     offsetTimes.shift();
-    offsetStale.shift();
   }
   historySeq = h.seq;
   historyEpoch = h.epoch;
@@ -421,29 +417,18 @@ function linearTimeAxis(count) {
   return { toX, grid: "", labels, spanText: spanLabel, inWindow: () => true };
 }
 
-// Ages (seconds before the newest sample) for the log time axis. After a restart the saved samples are older than the
-// newest ones by however long the server was down: an hour-long outage would push them off a 15 minute axis, so the gap
-// is drawn at most GAP_SHOWN_MAX_S wide (a short restart keeps its true width). The stale block is pulled in to match.
-const GAP_SHOWN_MAX_S = 15;
-function displayAgesS(times, staleCount) {
-  const newest = times[times.length - 1];
-  const plain = times.map((t) => (newest - t) / 1000);
-  if (staleCount <= 0 || staleCount >= times.length) return plain;
-  const gapS = (times[staleCount] - times[staleCount - 1]) / 1000;
-  const shift = Math.max(0, gapS - GAP_SHOWN_MAX_S);
-  return plain.map((age, i) => (i < staleCount ? age - shift : age));
-}
-
-// Time axis, log: newest sample at the right edge; the last seconds are spread out and the minutes before
-// are squeezed to the left, so 15 minutes fit in the same width. The axis is fixed at the full window.
-function logTimeAxis(times, staleCount) {
+// Time axis, log: the newest sample sits at the right edge while data is arriving; the last seconds are spread out and
+// the minutes before are squeezed to the left, so 15 minutes fit in the same width. The axis is fixed at the full window.
+// While the source is silent the axis is anchored to the present instead, so the last known value slides left and a
+// yellow line can be held out to the right edge.
+function logTimeAxis(times, anchorT) {
   const { w, h, padL, padR, padT, padB } = GRAPH;
   const plotW = w - padL - padR;
   const windowS = OFFSET_HISTORY_WINDOW_MS / 1000;
   const denom = Math.log10(1 + windowS / LOG_T_TAU_S);
   const xForAge = (ageS) => padL + (1 - Math.min(1, Math.log10(1 + Math.max(0, ageS) / LOG_T_TAU_S) / denom)) * plotW;
-  const ages = displayAgesS(times, staleCount);
-  const toX = (i) => xForAge(ages[i]);
+  const ageOf = (i) => (anchorT - times[i]) / 1000;
+  const toX = (i) => xForAge(ageOf(i));
   let grid = "";
   let labels = "";
   for (const [ageS, text] of TIME_TICKS) {
@@ -453,7 +438,7 @@ function logTimeAxis(times, staleCount) {
     const anchor = ageS === 0 ? "end" : ageS >= windowS ? "start" : "middle";
     labels += `<text x="${x.toFixed(1)}" y="${h - 4}" text-anchor="${anchor}" class="sparkline-tick">${text}</text>`;
   }
-  return { toX, grid, labels, spanText: `${Math.round(windowS / 60)}m`, inWindow: (i) => ages[i] <= windowS };
+  return { toX, grid, labels, spanText: `${Math.round(windowS / 60)}m`, inWindow: (i) => ageOf(i) <= windowS, xNow: xForAge(0), xLeft: padL };
 }
 
 function fmtDuration(ms) {
@@ -464,6 +449,12 @@ function fmtDuration(ms) {
   return `${Math.floor(min / 60)} h ${min % 60} min`;
 }
 
+// Yellow means "no data was arriving from the source": a stretch of at least GAP_MIN_S with no sample is bridged by a
+// yellow line, and while the newest sample is older than SILENT_AFTER_MS the last known value is held out to "now" in
+// yellow. Everything else, including samples the server restored from disk, is drawn as normal data.
+const GAP_MIN_S = 10;
+const SILENT_AFTER_MS = 10000;
+
 function renderOffsetSparkline() {
   const el = document.getElementById("offset-sparkline");
   const n = offsetHistory.length;
@@ -471,21 +462,40 @@ function renderOffsetSparkline() {
     el.innerHTML = "<p class='muted'>Collecting data…</p>";
     return;
   }
-  const { w, h, padT, padB } = GRAPH;
-  // Stale samples (restored from before a server restart) are always the oldest ones: a block at the start.
-  let staleCount = 0;
-  while (staleCount < n && offsetStale[staleCount]) staleCount += 1;
+  const { w, h } = GRAPH;
+  const now = Date.now();
+  const silentMs = now - offsetTimes[n - 1];
+  const silent = silentMs > SILENT_AFTER_MS;
   const yAxis = graphMode.yLog ? logValueAxis(offsetHistory) : linearValueAxis(offsetHistory);
-  const xAxis = graphMode.tLog ? logTimeAxis(offsetTimes, staleCount) : linearTimeAxis(n);
-  const pointsFor = (from, to) => {
+  const xAxis = graphMode.tLog ? logTimeAxis(offsetTimes, silent ? now : offsetTimes[n - 1]) : linearTimeAxis(n);
+  const at = (i) => `${xAxis.toX(i).toFixed(1)},${yAxis.toY(offsetHistory[i]).toFixed(1)}`;
+
+  // stretches with no data: between sample i-1 and sample i
+  const gaps = [];
+  for (let i = 1; i < n; i++) {
+    if ((offsetTimes[i] - offsetTimes[i - 1]) / 1000 > GAP_MIN_S) gaps.push(i);
+  }
+  // the grey line: runs of samples between gaps (only the part inside the axis window)
+  const runs = [];
+  let from = 0;
+  for (const g of [...gaps, n]) {
     const pts = [];
-    for (let i = from; i < to; i++) {
-      if (xAxis.inWindow(i)) pts.push(`${xAxis.toX(i).toFixed(1)},${yAxis.toY(offsetHistory[i]).toFixed(1)}`);
-    }
-    return pts;
-  };
-  const stalePts = pointsFor(0, staleCount);
-  const livePts = pointsFor(staleCount, n);
+    for (let i = from; i < g; i++) if (xAxis.inWindow(i)) pts.push(at(i));
+    if (pts.length > 1) runs.push(pts);
+    from = g;
+  }
+  // the yellow line: a bridge over each gap, and the held last value while the source is silent
+  const yellow = [];
+  for (const g of gaps) {
+    if (!xAxis.inWindow(g)) continue; // the whole gap is older than the axis
+    const before = xAxis.inWindow(g - 1) ? at(g - 1) : `${xAxis.xLeft},${yAxis.toY(offsetHistory[g - 1]).toFixed(1)}`; // clipped at the left edge
+    yellow.push([before, at(g)]);
+  }
+  if (silent && graphMode.tLog && xAxis.inWindow(n - 1)) {
+    yellow.push([at(n - 1), `${xAxis.xNow.toFixed(1)},${yAxis.toY(offsetHistory[n - 1]).toFixed(1)}`]);
+  }
+  const shownGaps = gaps.filter((g) => xAxis.inWindow(g));
+
   const lastIdx = n - 1;
   const last = offsetHistory[lastIdx];
   const min = Math.min(...offsetHistory);
@@ -495,36 +505,27 @@ function renderOffsetSparkline() {
     const t = (ms * u.k).toFixed(1);
     return t === "-0.0" ? "0.0" : t; // avoid a negative zero in the caption
   };
-  // where the server restarted: a dotted marker between the last stale sample and the first live one
-  let marker = "";
   let note = "";
-  if (staleCount > 0 && staleCount < n) {
-    const visibleStale = [...Array(staleCount).keys()].filter((i) => xAxis.inWindow(i));
-    const xa = visibleStale.length ? xAxis.toX(visibleStale[visibleStale.length - 1]) : GRAPH.padL;
-    const xm = ((xa + xAxis.toX(staleCount)) / 2).toFixed(1);
-    marker =
-      `<line x1="${xm}" x2="${xm}" y1="${padT}" y2="${h - padB}" class="sparkline-break" />` +
-      `<text x="${xm}" y="${padT + 8}" text-anchor="middle" class="sparkline-tick">restart</text>`;
-    const downMs = offsetTimes[staleCount] - offsetTimes[staleCount - 1];
-    note = `Yellow line: saved before the server restarted · nothing recorded for ${fmtDuration(downMs)}`;
-  } else if (staleCount === n) {
-    note = `Waiting for fresh data · the saved samples are up to ${fmtDuration(Date.now() - offsetTimes[n - 1])} old`;
+  if (silent) {
+    note = `No data from ntp.local for ${fmtDuration(silentMs)} · yellow shows the last known value`;
+  } else if (shownGaps.length) {
+    const g = shownGaps[shownGaps.length - 1];
+    note = `Yellow: no data for ${fmtDuration(offsetTimes[g] - offsetTimes[g - 1])}${shownGaps.length > 1 ? ` (latest of ${shownGaps.length} gaps)` : ""}`;
   }
   const aria =
     `System clock offset over the last ${xAxis.spanText}; ` +
     `value axis ${graphMode.yLog ? "logarithmic" : "linear"}, time axis ${graphMode.tLog ? "logarithmic" : "linear"}` +
-    (staleCount ? "; the yellow part was saved before the server restarted" : "");
+    (silent ? "; the source is silent, the yellow line holds the last known value" : shownGaps.length ? "; yellow marks stretches with no data" : "");
   el.innerHTML = `
     <svg viewBox="0 0 ${w} ${h}" class="sparkline-svg" role="img" aria-label="${aria}">
       ${yAxis.grid}
       ${xAxis.grid}
       ${xAxis.labels}
-      ${marker}
-      ${stalePts.length > 1 ? `<polyline points="${stalePts.join(" ")}" class="sparkline-line-stale" />` : ""}
-      ${livePts.length > 1 ? `<polyline points="${livePts.join(" ")}" class="sparkline-line" />` : ""}
-      <circle cx="${xAxis.toX(lastIdx).toFixed(1)}" cy="${yAxis.toY(last).toFixed(1)}" r="4" class="${staleCount === n ? "sparkline-dot-stale" : "sparkline-dot"}" />
+      ${runs.map((pts) => `<polyline points="${pts.join(" ")}" class="sparkline-line" />`).join("")}
+      ${yellow.map((seg) => `<polyline points="${seg.join(" ")}" class="sparkline-line-gap" />`).join("")}
+      <circle cx="${xAxis.toX(lastIdx).toFixed(1)}" cy="${yAxis.toY(last).toFixed(1)}" r="4" class="${silent ? "sparkline-dot-stale" : "sparkline-dot"}" />
     </svg>
-    <div class="sparkline-caption">${num(last)} ${u.unit} ${staleCount === n ? "at the last saved sample" : "now"} · range ${num(min)} to ${num(max)} ${u.unit}</div>
+    <div class="sparkline-caption">${num(last)} ${u.unit} ${silent ? "at the last sample" : "now"} · range ${num(min)} to ${num(max)} ${u.unit}</div>
     ${note ? `<div class="sparkline-stale-note">${note}</div>` : ""}
   `;
 }
@@ -561,19 +562,19 @@ async function poll() {
   try {
     const res = await fetch(`/api/status?since=${historySeq}&epoch=${historyEpoch === null ? "" : historyEpoch}`);
     const data = await res.json();
+    if (data.history) applyHistory(data.history); // the server keeps the offset history; the page only draws it (an error reply carries it too)
     if (!res.ok) throw new Error(data.error || "unknown error");
     banner.hidden = true;
     renderGps(data.gps);
     renderNtp(data.ntp, data.sources);
     renderSources(data.sources);
     renderSkyPlot(data.gps && data.gps.satellites);
-    if (data.history) applyHistory(data.history); // the server keeps the offset history; the page only draws it
-    renderOffsetSparkline();
   } catch (err) {
     banner.textContent = `Could not load status: ${err.message}`;
     banner.hidden = false;
   } finally {
     polling = false;
+    renderOffsetSparkline(); // also when nothing arrived: the graph then shows the silence
   }
 }
 

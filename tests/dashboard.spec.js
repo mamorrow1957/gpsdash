@@ -531,7 +531,7 @@ test("a restart restores the history with correct ages, and clients are told to 
   }
 });
 
-test("old saved samples are still loaded and flagged stale; invalid or future-stamped ones are dropped", async () => {
+test("old saved samples are still loaded however old; invalid or future-stamped ones are dropped", async () => {
   const dir = tempDir();
   const file = path.join(dir, "history.json");
   const now = Date.now();
@@ -553,51 +553,31 @@ test("old saved samples are still loaded and flagged stale; invalid or future-st
   try {
     const h = await historyOf(server);
     expect(h.samples.map((s) => s.offsetMs)).toEqual([1, 2, 3]); // oldest first
-    expect(h.samples.every((s) => s.stale === true)).toBe(true); // the newest is 80 minutes old
     expect(h.oldestAgeMs).toBeGreaterThan(119 * 60 * 1000);
+    expect(h.samples[0].stale).toBeUndefined(); // restored samples are ordinary data: nothing marks them
   } finally {
     await server.stop();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("a restart that only took a moment is not flagged stale; live samples never are", async () => {
+test("while the agent is unreachable the 502 reply still carries the history, so a page can draw the graph", async () => {
   const dir = tempDir();
   const file = path.join(dir, "history.json");
   const now = Date.now();
-  fs.writeFileSync(file, JSON.stringify({ version: 1, samples: [1, 2, 3].map((i) => ({ t: now - (4 - i) * 2000 - 3000, offsetMs: i })) }));
-  const agent = await startFakeAgent(() => 0.005);
-  const server = await startServer({ AGENT_URL: agent.url, POLL_INTERVAL_MS: "100", HISTORY_FILE: file });
+  fs.writeFileSync(file, JSON.stringify({ version: 1, samples: [1, 2, 3].map((i) => ({ t: now - (4 - i) * 60 * 1000, offsetMs: i })) }));
+  const server = await startServer({ AGENT_URL: `http://127.0.0.1:${await freePort()}/status`, POLL_INTERVAL_MS: "100", HISTORY_FILE: file });
   try {
-    await expect.poll(async () => (await historyOf(server)).count, { timeout: 8000 }).toBeGreaterThanOrEqual(6);
-    const h = await historyOf(server);
-    expect(h.samples.every((s) => s.stale === false)).toBe(true); // newest saved sample was seconds old: within HISTORY_STALE_AFTER_MS
+    const res = await fetch(`${server.base}/api/status?since=0&epoch=`);
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.error).toContain("could not reach ntp.local agent");
+    expect(body.history.samples.map((s) => s.offsetMs)).toEqual([1, 2, 3]);
+    // without ?since the error reply stays as small as before
+    const plain = await getJson(`${server.base}/api/status`);
+    expect(plain.history).toBeUndefined();
   } finally {
     await server.stop();
-    agent.close();
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("restored samples are stale, samples recorded after the restart are not, and the cutoff is configurable", async () => {
-  const dir = tempDir();
-  const file = path.join(dir, "history.json");
-  const now = Date.now();
-  fs.writeFileSync(file, JSON.stringify({ version: 1, samples: [1, 2, 3].map((i) => ({ t: now - 10 * 60 * 1000 + i * 2000, offsetMs: i })) }));
-  const agent = await startFakeAgent(() => 0.005);
-  const server = await startServer({ AGENT_URL: agent.url, POLL_INTERVAL_MS: "100", HISTORY_FILE: file });
-  try {
-    await expect.poll(async () => (await historyOf(server)).count, { timeout: 8000 }).toBeGreaterThanOrEqual(6);
-    const h = await historyOf(server);
-    const flags = h.samples.map((s) => s.stale);
-    expect(flags.slice(0, 3)).toEqual([true, true, true]); // from before the restart (10 minutes old)
-    expect(flags.slice(3).every((f) => f === false)).toBe(true); // recorded by this run
-    // and the plain status call carries the same flags
-    const status = await getJson(`${server.base}/api/status?since=0`);
-    expect(status.history.samples.slice(0, 3).every((s) => s.stale === true)).toBe(true);
-  } finally {
-    await server.stop();
-    agent.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -671,101 +651,127 @@ test("by default the history goes to the service user's state directory, outside
   }
 });
 
-// ---- Stale (restored) data on the graph ---------------------------------------------------------------------
-function staleThenLive(staleN, staleNewestAgeMs, liveN) {
-  const stale = Array.from({ length: staleN }, (_, i) => ({ seq: i + 1, ageMs: staleNewestAgeMs + (staleN - 1 - i) * 2000, offsetMs: 0.05, stale: true }));
-  const live = Array.from({ length: liveN }, (_, i) => ({ seq: staleN + i + 1, ageMs: (liveN - 1 - i) * 2000, offsetMs: 0.1, stale: false }));
-  return { epoch: 5, seq: staleN + liveN, reset: true, samples: [...stale, ...live] };
+// ---- Gaps and a silent source on the graph -------------------------------------------------------------
+// Yellow means "no data was arriving from the source". A stretch of 10 s or more with no sample is bridged by a yellow
+// line; while the newest sample is over 10 s old the last value is held out to "now" in yellow.
+function samplesWithGap() {
+  // 30 samples 12-13 minutes ago, then nothing for 11 minutes, then 30 samples up to now
+  const before = Array.from({ length: 30 }, (_, i) => ({ seq: i + 1, ageMs: 720000 + (29 - i) * 2000, offsetMs: 0.05 }));
+  const after = Array.from({ length: 30 }, (_, i) => ({ seq: 31 + i, ageMs: (29 - i) * 2000, offsetMs: 0.1 }));
+  return { epoch: 5, seq: 60, reset: true, samples: [...before, ...after] };
 }
 
-const polyPoints = (page, cls) =>
-  page.evaluate((c) => {
-    const el = document.querySelector(`#offset-sparkline polyline.${c}`);
-    return el ? el.getAttribute("points").trim().split(/\s+/).map((p) => p.split(",").map(Number)) : null;
-  }, cls);
+// a status reply of 502 that still carries the history, as the real server sends while the agent is silent
+async function stubOutage(page, history) {
+  await page.route("**/api/status*", (route) =>
+    route.fulfill({ status: 502, json: { error: "could not reach ntp.local agent: connect ECONNREFUSED", history } })
+  );
+}
 
-test("restored (stale) samples are drawn as a solid yellow line of their own, with a restart marker and a note", async ({ page }) => {
-  await stubStatusHistory(page, [staleThenLive(300, 2 * 60 * 60 * 1000, 30)]); // saved 2 hours ago, then 1 minute of live data
+const polylineCount = (page, cls) => page.locator(`#offset-sparkline polyline.${cls}`).count();
+
+test("a gap in the samples is bridged by a solid yellow line and noted; the rest stays grey", async ({ page }) => {
+  await stubStatusHistory(page, [samplesWithGap()]);
   await page.goto("/");
   const graph = page.locator("#offset-sparkline");
-  await expect(graph.locator("polyline.sparkline-line-stale")).toHaveCount(1);
-  await expect(graph.locator("polyline.sparkline-line")).toHaveCount(1);
-  expect((await polyPoints(page, "sparkline-line-stale")).length).toBe(300);
-  expect((await polyPoints(page, "sparkline-line")).length).toBe(30);
-  await expect(graph.locator("line.sparkline-break")).toHaveCount(1);
-  await expect(graph.locator(".sparkline-stale-note")).toContainText("Yellow line: saved before the server restarted");
-  await expect(graph.locator(".sparkline-stale-note")).toContainText("nothing recorded for 1 h 5"); // ~1 h 59 min
-  // the look: a solid line (no dashes) in yellow, and the note in the same yellow
+  await expect(graph.locator("polyline.sparkline-line-gap")).toHaveCount(1);
+  await expect(graph.locator("polyline.sparkline-line")).toHaveCount(2); // one run before the gap, one after
+  const runs = await page.evaluate(() => [...document.querySelectorAll("#offset-sparkline polyline.sparkline-line")].map((p) => p.getAttribute("points").trim().split(/\s+/).length));
+  expect(runs).toEqual([30, 30]);
+  await expect(graph.locator(".sparkline-stale-note")).toContainText("Yellow: no data for 11 min");
+  await expect(graph.locator("circle.sparkline-dot")).toHaveCount(1); // data is arriving now: the normal dot
+  // the look: solid (no dashes) and yellow, the note in the same yellow
   const look = await page.evaluate(() => {
-    const line = getComputedStyle(document.querySelector("#offset-sparkline polyline.sparkline-line-stale"));
+    const line = getComputedStyle(document.querySelector("#offset-sparkline polyline.sparkline-line-gap"));
     const note = getComputedStyle(document.querySelector("#offset-sparkline .sparkline-stale-note"));
     return { stroke: line.stroke, dash: line.strokeDasharray, noteColor: note.color };
   });
   expect(look.dash).toBe("none");
   expect(look.stroke).toBe("rgb(245, 211, 61)");
   expect(look.noteColor).toBe("rgb(245, 211, 61)");
-  await expect(graph.locator("circle.sparkline-dot")).toHaveCount(1); // the newest sample is live
 });
 
-test("a long outage is drawn as a short gap: stale block left of the marker, live data right of it, all on the axis", async ({ page }) => {
-  await stubStatusHistory(page, [staleThenLive(300, 2 * 60 * 60 * 1000, 30)]);
+test("the bridge joins the last sample before the gap to the first after it", async ({ page }) => {
+  await stubStatusHistory(page, [samplesWithGap()]);
   await page.goto("/");
-  await expect(page.locator("#offset-sparkline polyline.sparkline-line-stale")).toHaveCount(1);
-  const stale = await polyPoints(page, "sparkline-line-stale");
-  const live = await polyPoints(page, "sparkline-line");
-  const breakX = await page.evaluate(() => +document.querySelector("#offset-sparkline line.sparkline-break").getAttribute("x1"));
-  const staleXs = stale.map((p) => p[0]);
-  const liveXs = live.map((p) => p[0]);
-  expect(Math.min(...staleXs)).toBeGreaterThanOrEqual(46); // inside the plot area (left padding 46)
-  expect(Math.max(...staleXs)).toBeLessThan(breakX);
-  expect(breakX).toBeLessThan(Math.min(...liveXs));
+  await expect(page.locator("#offset-sparkline polyline.sparkline-line-gap")).toHaveCount(1);
+  const geo = await page.evaluate(() => {
+    const pts = (el) => el.getAttribute("points").trim().split(/\s+/).map((p) => p.split(",").map(Number));
+    const runs = [...document.querySelectorAll("#offset-sparkline polyline.sparkline-line")].map(pts);
+    const bridge = pts(document.querySelector("#offset-sparkline polyline.sparkline-line-gap"));
+    return { endOfFirst: runs[0][runs[0].length - 1], startOfSecond: runs[1][0], bridge };
+  });
+  expect(geo.bridge[0]).toEqual(geo.endOfFirst);
+  expect(geo.bridge[1]).toEqual(geo.startOfSecond);
 });
 
-test("with no fresh sample yet the graph shows only the saved data and says it is waiting", async ({ page }) => {
-  await stubStatusHistory(page, [staleThenLive(100, 5 * 60 * 1000, 0)]); // everything saved, newest 5 minutes old
+test("when the source is silent the last value is held to the right edge in yellow and the note says for how long", async ({ page }) => {
+  // the newest sample is 2 minutes old: nothing has arrived since
+  const oldSamples = Array.from({ length: 60 }, (_, i) => ({ seq: i + 1, ageMs: 120000 + (59 - i) * 2000, offsetMs: 0.05 }));
+  await stubStatusHistory(page, [{ epoch: 5, seq: 60, reset: true, samples: oldSamples }]);
   await page.goto("/");
   const graph = page.locator("#offset-sparkline");
-  await expect(graph.locator("polyline.sparkline-line-stale")).toHaveCount(1);
-  await expect(graph.locator("polyline.sparkline-line")).toHaveCount(0);
-  await expect(graph.locator("line.sparkline-break")).toHaveCount(0);
+  await expect(graph.locator("polyline.sparkline-line-gap")).toHaveCount(1); // the held line
   await expect(graph.locator("circle.sparkline-dot-stale")).toHaveCount(1);
-  await expect(graph.locator(".sparkline-stale-note")).toContainText("Waiting for fresh data");
-  await expect(graph.locator(".sparkline-caption")).toContainText("at the last saved sample");
+  await expect(graph.locator("circle.sparkline-dot")).toHaveCount(0);
+  await expect(graph.locator(".sparkline-stale-note")).toContainText("No data from ntp.local for 2 min");
+  await expect(graph.locator(".sparkline-caption")).toContainText("at the last sample");
+  const held = await page.evaluate(() => document.querySelector("#offset-sparkline polyline.sparkline-line-gap").getAttribute("points").trim().split(/\s+/).map((p) => p.split(",").map(Number)));
+  expect(held[1][0]).toBeCloseTo(312, 0); // the right edge of the plot (320 wide, 8 padding)
+  expect(held[0][1]).toBeCloseTo(held[1][1], 0); // flat: the last known value
+  expect(held[0][0]).toBeLessThan(held[1][0]);
 });
 
-test("without stale samples nothing is yellow and there is no marker or note", async ({ page }) => {
+test("a page opened while the source is silent still draws the graph, with the error banner", async ({ page }) => {
+  const oldSamples = Array.from({ length: 40 }, (_, i) => ({ seq: i + 1, ageMs: 90000 + (39 - i) * 2000, offsetMs: 0.05 }));
+  await stubOutage(page, { epoch: 5, seq: 40, reset: true, samples: oldSamples });
+  await page.goto("/");
+  await expect(page.locator("#error-banner")).toBeVisible();
+  await expect(page.locator("#error-banner")).toContainText("could not reach ntp.local agent");
+  await expect(page.locator("#offset-sparkline polyline.sparkline-line")).toHaveCount(1);
+  await expect(page.locator("#offset-sparkline polyline.sparkline-line-gap")).toHaveCount(1);
+  await expect(page.locator("#offset-sparkline .sparkline-stale-note")).toContainText("No data from ntp.local");
+});
+
+test("when the source resumes the hold turns into a yellow bridge and the dot returns to normal", async ({ page }) => {
+  const old = Array.from({ length: 30 }, (_, i) => ({ seq: i + 1, ageMs: 120000 + (29 - i) * 2000, offsetMs: 0.05 }));
+  await stubStatusHistory(page, [
+    { epoch: 5, seq: 30, reset: true, samples: old }, // first poll: silent for 2 minutes
+    { epoch: 5, seq: 32, reset: false, samples: [{ seq: 31, ageMs: 2000, offsetMs: 0.1 }, { seq: 32, ageMs: 0, offsetMs: 0.1 }] }, // then data again
+  ]);
+  await page.goto("/");
+  await expect(page.locator("#offset-sparkline .sparkline-stale-note")).toContainText("No data from ntp.local");
+  await expect(page.locator("#offset-sparkline .sparkline-stale-note")).toContainText("Yellow: no data for", { timeout: 8000 });
+  await expect(page.locator("#offset-sparkline circle.sparkline-dot")).toHaveCount(1);
+  await expect(page.locator("#offset-sparkline circle.sparkline-dot-stale")).toHaveCount(0);
+});
+
+test("with no gaps nothing is yellow and there is no note", async ({ page }) => {
   await stubStatusHistory(page, [{ epoch: 3, seq: 60, reset: true, samples: samples(60) }]);
   await page.goto("/");
   const graph = page.locator("#offset-sparkline");
   await expect(graph.locator("polyline.sparkline-line")).toHaveCount(1);
-  await expect(graph.locator("polyline.sparkline-line-stale")).toHaveCount(0);
-  await expect(graph.locator("line.sparkline-break")).toHaveCount(0);
+  expect(await polylineCount(page, "sparkline-line-gap")).toBe(0);
   await expect(graph.locator(".sparkline-stale-note")).toHaveCount(0);
+  await expect(graph.locator("circle.sparkline-dot")).toHaveCount(1);
 });
 
-test("the linear time axis also shows the stale block in yellow, with the marker between the two", async ({ page }) => {
-  await stubStatusHistory(page, [staleThenLive(200, 30 * 60 * 1000, 40)]);
+test("the linear time axis also bridges a gap in yellow", async ({ page }) => {
+  await stubStatusHistory(page, [samplesWithGap()]);
   await page.goto("/");
-  await expect(page.locator("#offset-sparkline polyline.sparkline-line-stale")).toHaveCount(1);
+  await expect(page.locator("#offset-sparkline polyline.sparkline-line-gap")).toHaveCount(1);
   await page.locator("#toggle-t").click();
   await expect(page.locator("#toggle-t")).toHaveText("Time: linear");
   const graph = page.locator("#offset-sparkline");
-  await expect(graph.locator("polyline.sparkline-line-stale")).toHaveCount(1);
-  await expect(graph.locator("polyline.sparkline-line")).toHaveCount(1);
-  await expect(graph.locator("line.sparkline-break")).toHaveCount(1);
-  const stale = await polyPoints(page, "sparkline-line-stale");
-  const live = await polyPoints(page, "sparkline-line");
-  expect(Math.max(...stale.map((p) => p[0]))).toBeLessThan(Math.min(...live.map((p) => p[0])));
+  await expect(graph.locator("polyline.sparkline-line-gap")).toHaveCount(1);
+  await expect(graph.locator("polyline.sparkline-line")).toHaveCount(2);
+  await expect(graph.locator(".sparkline-stale-note")).toContainText("Yellow: no data for 11 min");
 });
 
-test("when fresh data pushes the saved samples out, the yellow line and the note go away", async ({ page }) => {
-  // the server drops the stale samples from its buffer as live ones arrive; a reset response carries only what is left
-  await stubStatusHistory(page, [
-    staleThenLive(50, 60 * 60 * 1000, 10),
-    { epoch: 5, seq: 90, reset: true, samples: samples(60, 31) },
-  ]);
+test("samples the server restored from disk are drawn as ordinary data, not yellow", async ({ page }) => {
+  // the server no longer marks restored samples: a restart is not "no data from the source"
+  await stubStatusHistory(page, [{ epoch: 8, seq: 100, reset: true, samples: samples(100) }]);
   await page.goto("/");
-  await expect(page.locator("#offset-sparkline polyline.sparkline-line-stale")).toHaveCount(1);
-  await expect(page.locator("#offset-sparkline polyline.sparkline-line-stale")).toHaveCount(0, { timeout: 8000 });
-  await expect(page.locator("#offset-sparkline .sparkline-stale-note")).toHaveCount(0);
+  await expect(page.locator("#offset-sparkline polyline.sparkline-line")).toHaveCount(1);
+  expect(await polylineCount(page, "sparkline-line-gap")).toBe(0);
 });
