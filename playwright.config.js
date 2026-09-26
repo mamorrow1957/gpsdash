@@ -10,7 +10,6 @@ module.exports = defineConfig({
   webServer: {
     command: "node server.js",
     port: 3000,
-    env: { HISTORY_FILE: "" }, // never write the offset history into the real state directory during tests
     reuseExistingServer: !process.env.CI,
   },
   use: {

@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
 """Exposes chrony + gpsd status from this host as JSON over HTTP.
 
-Runs on ntp.local. gpsdash polls this to build its dashboard.
+Runs on ntp.local. gpsdash polls /status for the panels and reads /history (the last 15 minutes of clock-offset
+samples, kept here so a restart of gpsdash never loses them) to draw the graph.
 """
 
 import json
 import math
+import os
+import signal
 import subprocess
+import sys
+import threading
+import time
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 import gps
 
@@ -37,8 +45,16 @@ def ecef_to_geodetic(x, y, z):
     alt = p / math.cos(lat) - n
     return math.degrees(lat), math.degrees(lon), alt
 
-PORT = 8081
+PORT = int(os.environ.get("AGENT_PORT", "8081"))
 GPS_TIMEOUT_SECONDS = 3
+
+# Clock-offset history: the agent samples chrony every SAMPLE_INTERVAL_S and keeps the last HISTORY_WINDOW_S in a ring
+# buffer, saved to disk so a restart or a deploy does not empty it. gpsdash reads it from /history, so it always has the
+# last 15 minutes, whatever restarted. (chronyc takes ~8 ms; the gpsd session behind /status is what takes ~1 s.)
+SAMPLE_INTERVAL_S = float(os.environ.get("SAMPLE_INTERVAL_S", "2"))
+HISTORY_WINDOW_S = float(os.environ.get("HISTORY_WINDOW_S", "900"))
+HISTORY_CAPACITY = max(1, round(HISTORY_WINDOW_S / SAMPLE_INTERVAL_S))
+SAVE_INTERVAL_S = float(os.environ.get("HISTORY_SAVE_INTERVAL_S", "30"))
 
 CHRONY_SOURCE_MODES = {"^": "server", "=": "peer", "#": "local"}
 CHRONY_SOURCE_STATES = {
@@ -143,6 +159,141 @@ def get_gps_fix():
     return fix
 
 
+def history_file_path():
+    """Where the buffer is saved. Outside the deploy folder (agent/deploy.sh runs rsync --delete into it).
+    AGENT_HISTORY_FILE overrides; "" or "off" turns saving off."""
+    configured = os.environ.get("AGENT_HISTORY_FILE")
+    if configured in ("", "off"):
+        return None
+    if configured:
+        return configured
+    state_home = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
+    return os.path.join(state_home, "gpsdash-agent", "history.json")
+
+
+class History:
+    """Ring buffer of clock-offset samples. Times are this host's clock (GPS-disciplined); readers get ages."""
+
+    def __init__(self, capacity, path):
+        self.capacity = capacity
+        self.path = path
+        self.lock = threading.Lock()
+        self.samples = deque(maxlen=capacity)  # (seq, t_ms, offset_ms), oldest first
+        self.seq = 0
+        self.epoch = int(time.time() * 1000)  # identifies this run: a reader holding another epoch must start over
+        self.dirty = False
+        self.save_error_logged = False
+
+    def add(self, offset_ms, t_ms=None):
+        with self.lock:
+            self.seq += 1
+            self.samples.append((self.seq, t_ms if t_ms is not None else time.time() * 1000, offset_ms))
+            self.dirty = True
+
+    def since(self, since, epoch):
+        """The samples newer than `since` (as ages). A reader from another run, or with a number from the future, resets."""
+        now_ms = time.time() * 1000
+        with self.lock:
+            reset = str(epoch) != str(self.epoch) or not (0 <= since <= self.seq)
+            start = 0 if reset else since
+            return {
+                "epoch": self.epoch,
+                "seq": self.seq,
+                "reset": reset,
+                "intervalMs": SAMPLE_INTERVAL_S * 1000,
+                "windowMs": HISTORY_WINDOW_S * 1000,
+                "capacity": self.capacity,
+                "count": len(self.samples),
+                "samples": [
+                    {"seq": q, "ageMs": now_ms - t, "offsetMs": v} for (q, t, v) in self.samples if q > start
+                ],
+            }
+
+    def load(self):
+        """Restore the saved samples, however old (the gap since they were taken shows up as a gap). Invalid samples and
+        ones stamped in the future (a clock that was stepped) are dropped; the capacity keeps the newest."""
+        if not self.path:
+            print("history saving is off", flush=True)
+            return
+        try:
+            with open(self.path) as f:
+                saved = json.load(f)
+        except FileNotFoundError:
+            print(f"no saved history yet ({self.path})", flush=True)
+            return
+        except Exception as e:
+            print(f"ignoring unreadable history file {self.path}: {e}", flush=True)
+            return
+        now_ms = time.time() * 1000
+        raw = saved.get("samples") if isinstance(saved, dict) else None
+        good = []
+        for x in raw if isinstance(raw, list) else []:
+            try:
+                t, v = float(x["t"]), float(x["offsetMs"])
+            except Exception:
+                continue
+            if math.isfinite(t) and math.isfinite(v) and t <= now_ms + 5000:
+                good.append((t, v))
+        good.sort()
+        for t, v in good[-self.capacity :]:
+            self.add(v, t)
+        self.dirty = False
+        if good:
+            print(f"restored {min(len(good), self.capacity)} history samples from {self.path} "
+                  f"(newest {round((now_ms - good[-1][0]) / 1000)} s old)", flush=True)
+        else:
+            print(f"saved history in {self.path} was empty", flush=True)
+
+    def save(self):
+        """Written to a temporary file and renamed into place, so a crash mid-write never leaves a half-written file."""
+        if not self.path:
+            return
+        tmp = f"{self.path}.{os.getpid()}.tmp"
+        try:
+            with self.lock:
+                body = json.dumps({
+                    "version": 1,
+                    "savedAt": time.time() * 1000,
+                    "windowMs": HISTORY_WINDOW_S * 1000,
+                    "intervalMs": SAMPLE_INTERVAL_S * 1000,
+                    "samples": [{"t": t, "offsetMs": v} for (_, t, v) in self.samples],
+                })
+                self.dirty = False
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            with open(tmp, "w") as f:
+                f.write(body)
+            os.replace(tmp, self.path)
+        except Exception as e:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            if not self.save_error_logged:
+                print(f"could not save history to {self.path}: {e}", flush=True)
+            self.save_error_logged = True
+
+
+history = History(HISTORY_CAPACITY, history_file_path())
+
+
+def sampler_loop():
+    """Take one offset reading per interval. If chrony cannot be read the round is skipped (a gap gpsdash will show)."""
+    while True:
+        started = time.monotonic()
+        try:
+            history.add(get_chrony_tracking()["system_offset_seconds"] * 1000)
+        except Exception:
+            pass
+        time.sleep(max(0.0, SAMPLE_INTERVAL_S - (time.monotonic() - started)))
+
+
+def saver_loop():
+    while True:
+        time.sleep(SAVE_INTERVAL_S)
+        if history.dirty:
+            history.save()
+
+
 class Handler(BaseHTTPRequestHandler):
     def _json(self, status, payload):
         body = json.dumps(payload).encode()
@@ -155,6 +306,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             self._json(200, {"status": "ok"})
+        elif urlparse(self.path).path == "/history":
+            q = parse_qs(urlparse(self.path).query)
+            try:
+                since = int(q.get("since", ["0"])[0])
+            except ValueError:
+                since = -1  # not a number: treated like a reader from the future, so it resets
+            self._json(200, history.since(since, q.get("epoch", [""])[0]))
         elif self.path == "/status":
             try:
                 self._json(
@@ -174,5 +332,16 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+def _shutdown(signum, frame):
+    # systemd stops the service with SIGTERM (a deploy restarts it): save what we have before exiting
+    history.save()
+    sys.exit(0)
+
+
 if __name__ == "__main__":
+    history.load()
+    threading.Thread(target=sampler_loop, daemon=True).start()
+    threading.Thread(target=saver_loop, daemon=True).start()
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
