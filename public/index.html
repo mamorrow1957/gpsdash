@@ -32,7 +32,13 @@
         <div id="sky-plot">Loading…</div>
       </section>
       <section>
-        <h2>Clock offset</h2>
+        <div class="section-head">
+          <h2>Clock offset</h2>
+          <div class="graph-toggles" role="group" aria-label="Graph scales">
+            <button type="button" id="toggle-y" class="toggle" aria-pressed="true" title="Value axis: logarithmic or linear">Value: log</button>
+            <button type="button" id="toggle-t" class="toggle" aria-pressed="true" title="Time axis: logarithmic or linear">Time: log</button>
+          </div>
+        </div>
         <div id="offset-sparkline">Loading…</div>
       </section>
     </div>
