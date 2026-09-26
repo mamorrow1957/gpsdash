@@ -239,6 +239,8 @@ test("without constellation data (older agent) the sky view falls back to plain 
 // These start the real server.js against a small fake agent, with a short poll interval, so the ring buffer, the
 // since/epoch protocol and the agent-load behaviour can be checked without real hardware.
 const http = require("http");
+const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 
@@ -270,7 +272,7 @@ async function startServer(env) {
   const port = await freePort();
   const child = spawn("node", ["server.js"], {
     cwd: path.join(__dirname, ".."),
-    env: { ...process.env, PORT: String(port), ...env },
+    env: { ...process.env, PORT: String(port), HISTORY_FILE: "", ...env }, // persistence is off unless a test sets HISTORY_FILE
     stdio: "ignore",
   });
   const base = `http://127.0.0.1:${port}`;
@@ -282,7 +284,14 @@ async function startServer(env) {
     }
     await new Promise((r) => setTimeout(r, 100));
   }
-  return { base, stop: () => child.kill() };
+  // stop() sends SIGTERM (as systemd does) and resolves once the process has exited
+  const stop = () =>
+    new Promise((resolve) => {
+      if (child.exitCode !== null) return resolve();
+      child.once("exit", resolve);
+      child.kill("SIGTERM");
+    });
+  return { base, stop };
 }
 
 const getJson = async (url) => (await fetch(url)).json();
@@ -442,4 +451,312 @@ test("a reset from the server (it restarted) makes the page drop what it had", a
   await page.goto("/");
   await expect.poll(() => plotted(page)).toBe(10);
   await expect.poll(() => plotted(page), { timeout: 8000 }).toBe(3);
+});
+
+// ---- Saving the history to disk -------------------------------------------------------------------------
+const tempDir = () => fs.mkdtempSync(path.join(os.tmpdir(), "gpsdash-history-"));
+
+async function historyOf(server) {
+  return getJson(`${server.base}/api/history`);
+}
+
+test("the history is saved to disk periodically, atomically, with the samples and their timestamps", async () => {
+  const dir = tempDir();
+  const file = path.join(dir, "history.json");
+  const agent = await startFakeAgent((n) => 0.001 * (n + 1));
+  const server = await startServer({ AGENT_URL: agent.url, POLL_INTERVAL_MS: "100", HISTORY_FILE: file, HISTORY_SAVE_INTERVAL_MS: "200" });
+  try {
+    await expect.poll(() => fs.existsSync(file) && JSON.parse(fs.readFileSync(file, "utf8")).samples.length, { timeout: 8000 }).toBeGreaterThanOrEqual(3);
+    const saved = JSON.parse(fs.readFileSync(file, "utf8"));
+    expect(saved.version).toBe(1);
+    expect(saved.samples[0]).toEqual({ t: expect.any(Number), offsetMs: expect.any(Number) });
+    expect(fs.readdirSync(dir)).toEqual(["history.json"]); // no temporary file left behind
+  } finally {
+    await server.stop();
+    agent.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a graceful stop saves the latest samples even when the save interval is long", async () => {
+  const dir = tempDir();
+  const file = path.join(dir, "history.json");
+  const agent = await startFakeAgent((n) => 0.001 * (n + 1));
+  const server = await startServer({ AGENT_URL: agent.url, POLL_INTERVAL_MS: "100", HISTORY_FILE: file, HISTORY_SAVE_INTERVAL_MS: "600000" });
+  try {
+    await expect.poll(async () => (await historyOf(server)).count, { timeout: 8000 }).toBeGreaterThanOrEqual(4);
+    expect(fs.existsSync(file)).toBe(false); // the periodic save has not fired yet
+    const held = (await historyOf(server)).count;
+    await server.stop(); // SIGTERM, like `systemctl restart` during a deploy
+    const saved = JSON.parse(fs.readFileSync(file, "utf8"));
+    expect(saved.samples.length).toBeGreaterThanOrEqual(held);
+  } finally {
+    await server.stop();
+    agent.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a restart restores the history with correct ages, and clients are told to reset", async () => {
+  const dir = tempDir();
+  const file = path.join(dir, "history.json");
+  const agent = await startFakeAgent((n) => 0.001 * (n + 1));
+  const first = await startServer({ AGENT_URL: agent.url, POLL_INTERVAL_MS: "100", HISTORY_FILE: file });
+  let before;
+  try {
+    await expect.poll(async () => (await historyOf(first)).count, { timeout: 8000 }).toBeGreaterThanOrEqual(5);
+    before = await historyOf(first);
+  } finally {
+    await first.stop();
+    agent.close();
+  }
+  // second run: the agent is unreachable, so everything it holds must have come from the file
+  const down = await freePort();
+  const second = await startServer({ AGENT_URL: `http://127.0.0.1:${down}/status`, POLL_INTERVAL_MS: "100", HISTORY_FILE: file });
+  try {
+    const after = await historyOf(second);
+    expect(after.count).toBeGreaterThanOrEqual(before.count);
+    expect(after.epoch).not.toBe(before.epoch);
+    expect(after.samples.slice(0, 3).map((s) => s.offsetMs)).toEqual(before.samples.slice(0, 3).map((s) => s.offsetMs));
+    // the samples are older now by roughly the time that passed, not reset to "just now"
+    expect(after.oldestAgeMs).toBeGreaterThan(before.oldestAgeMs);
+    // a page that held the first run's history is told to drop it and take the restored one
+    const status = await fetch(`${second.base}/api/status?since=${before.seq}&epoch=${before.epoch}`);
+    expect(status.status).toBe(502); // agent is down, but the history is served from /api/history
+    const seeded = await getJson(`${second.base}/api/history`);
+    expect(seeded.count).toBe(after.count);
+  } finally {
+    await second.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("old saved samples are still loaded and flagged stale; invalid or future-stamped ones are dropped", async () => {
+  const dir = tempDir();
+  const file = path.join(dir, "history.json");
+  const now = Date.now();
+  fs.writeFileSync(
+    file,
+    JSON.stringify({
+      version: 1,
+      samples: [
+        { t: now - 2 * 60 * 60 * 1000, offsetMs: 1 }, // two hours old: kept (the graph stays populated after an outage)
+        { t: now - 90 * 60 * 1000, offsetMs: 2 },
+        { t: now - 80 * 60 * 1000, offsetMs: 3 },
+        { t: now + 10 * 60 * 1000, offsetMs: 9 }, // ten minutes in the future: a stepped clock, dropped
+        { t: "not a number", offsetMs: 9 },
+        null,
+      ],
+    })
+  );
+  const server = await startServer({ AGENT_URL: `http://127.0.0.1:${await freePort()}/status`, POLL_INTERVAL_MS: "100", HISTORY_FILE: file });
+  try {
+    const h = await historyOf(server);
+    expect(h.samples.map((s) => s.offsetMs)).toEqual([1, 2, 3]); // oldest first
+    expect(h.samples.every((s) => s.stale === true)).toBe(true); // the newest is 80 minutes old
+    expect(h.oldestAgeMs).toBeGreaterThan(119 * 60 * 1000);
+  } finally {
+    await server.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a restart that only took a moment is not flagged stale; live samples never are", async () => {
+  const dir = tempDir();
+  const file = path.join(dir, "history.json");
+  const now = Date.now();
+  fs.writeFileSync(file, JSON.stringify({ version: 1, samples: [1, 2, 3].map((i) => ({ t: now - (4 - i) * 2000 - 3000, offsetMs: i })) }));
+  const agent = await startFakeAgent(() => 0.005);
+  const server = await startServer({ AGENT_URL: agent.url, POLL_INTERVAL_MS: "100", HISTORY_FILE: file });
+  try {
+    await expect.poll(async () => (await historyOf(server)).count, { timeout: 8000 }).toBeGreaterThanOrEqual(6);
+    const h = await historyOf(server);
+    expect(h.samples.every((s) => s.stale === false)).toBe(true); // newest saved sample was seconds old: within HISTORY_STALE_AFTER_MS
+  } finally {
+    await server.stop();
+    agent.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("restored samples are stale, samples recorded after the restart are not, and the cutoff is configurable", async () => {
+  const dir = tempDir();
+  const file = path.join(dir, "history.json");
+  const now = Date.now();
+  fs.writeFileSync(file, JSON.stringify({ version: 1, samples: [1, 2, 3].map((i) => ({ t: now - 10 * 60 * 1000 + i * 2000, offsetMs: i })) }));
+  const agent = await startFakeAgent(() => 0.005);
+  const server = await startServer({ AGENT_URL: agent.url, POLL_INTERVAL_MS: "100", HISTORY_FILE: file });
+  try {
+    await expect.poll(async () => (await historyOf(server)).count, { timeout: 8000 }).toBeGreaterThanOrEqual(6);
+    const h = await historyOf(server);
+    const flags = h.samples.map((s) => s.stale);
+    expect(flags.slice(0, 3)).toEqual([true, true, true]); // from before the restart (10 minutes old)
+    expect(flags.slice(3).every((f) => f === false)).toBe(true); // recorded by this run
+    // and the plain status call carries the same flags
+    const status = await getJson(`${server.base}/api/status?since=0`);
+    expect(status.history.samples.slice(0, 3).every((s) => s.stale === true)).toBe(true);
+  } finally {
+    await server.stop();
+    agent.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("when more samples were saved than the buffer holds, the newest ones are kept", async () => {
+  const dir = tempDir();
+  const file = path.join(dir, "history.json");
+  const now = Date.now();
+  fs.writeFileSync(file, JSON.stringify({ version: 1, samples: Array.from({ length: 25 }, (_, i) => ({ t: now - (25 - i) * 60 * 1000, offsetMs: i })) }));
+  const server = await startServer({ AGENT_URL: `http://127.0.0.1:${await freePort()}/status`, POLL_INTERVAL_MS: "100", HISTORY_WINDOW_MS: "1000", HISTORY_FILE: file });
+  try {
+    const h = await historyOf(server);
+    expect(h.capacity).toBe(10);
+    expect(h.samples.map((s) => s.offsetMs)).toEqual([15, 16, 17, 18, 19, 20, 21, 22, 23, 24]);
+  } finally {
+    await server.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a corrupt history file is ignored: the server starts empty and still works", async () => {
+  const dir = tempDir();
+  const file = path.join(dir, "history.json");
+  fs.writeFileSync(file, "{ this is not json");
+  const agent = await startFakeAgent(() => 0.00002);
+  const server = await startServer({ AGENT_URL: agent.url, POLL_INTERVAL_MS: "100", HISTORY_FILE: file, HISTORY_SAVE_INTERVAL_MS: "200" });
+  try {
+    expect((await fetch(`${server.base}/api/health`)).ok).toBe(true);
+    await expect.poll(async () => (await historyOf(server)).count, { timeout: 8000 }).toBeGreaterThanOrEqual(2);
+    // and the next save replaces the garbage with a valid file
+    await expect.poll(() => { try { return JSON.parse(fs.readFileSync(file, "utf8")).samples.length; } catch (e) { return 0; } }, { timeout: 8000 }).toBeGreaterThanOrEqual(2);
+  } finally {
+    await server.stop();
+    agent.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("persistence can be switched off: nothing is written", async () => {
+  const dir = tempDir();
+  const agent = await startFakeAgent(() => 0.00002);
+  const server = await startServer({ AGENT_URL: agent.url, POLL_INTERVAL_MS: "100", HISTORY_FILE: "off", HISTORY_SAVE_INTERVAL_MS: "100", HOME: dir, XDG_STATE_HOME: dir });
+  try {
+    await expect.poll(async () => (await historyOf(server)).count, { timeout: 8000 }).toBeGreaterThanOrEqual(4);
+    await server.stop();
+    expect(fs.readdirSync(dir)).toEqual([]); // not even the default location was used
+  } finally {
+    await server.stop();
+    agent.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("by default the history goes to the service user's state directory, outside the app folder", async () => {
+  const dir = tempDir();
+  const agent = await startFakeAgent(() => 0.00002);
+  const env = { AGENT_URL: agent.url, POLL_INTERVAL_MS: "100", HISTORY_SAVE_INTERVAL_MS: "100", XDG_STATE_HOME: dir };
+  const server = await startServer({ ...env, HISTORY_FILE: undefined });
+  // startServer forces HISTORY_FILE "" (off); this test wants the default, so start one by hand
+  await server.stop();
+  const port = await freePort();
+  const child = spawn("node", ["server.js"], { cwd: path.join(__dirname, ".."), env: { ...process.env, ...env, PORT: String(port), HISTORY_FILE: undefined }, stdio: "ignore" });
+  try {
+    const expected = path.join(dir, "gpsdash", "history.json");
+    await expect.poll(() => fs.existsSync(expected), { timeout: 8000 }).toBe(true);
+    expect(path.relative(path.join(__dirname, ".."), expected).startsWith("..")).toBe(true); // not inside the checkout / deploy target
+  } finally {
+    child.kill("SIGTERM");
+    agent.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---- Stale (restored) data on the graph ---------------------------------------------------------------------
+function staleThenLive(staleN, staleNewestAgeMs, liveN) {
+  const stale = Array.from({ length: staleN }, (_, i) => ({ seq: i + 1, ageMs: staleNewestAgeMs + (staleN - 1 - i) * 2000, offsetMs: 0.05, stale: true }));
+  const live = Array.from({ length: liveN }, (_, i) => ({ seq: staleN + i + 1, ageMs: (liveN - 1 - i) * 2000, offsetMs: 0.1, stale: false }));
+  return { epoch: 5, seq: staleN + liveN, reset: true, samples: [...stale, ...live] };
+}
+
+const polyPoints = (page, cls) =>
+  page.evaluate((c) => {
+    const el = document.querySelector(`#offset-sparkline polyline.${c}`);
+    return el ? el.getAttribute("points").trim().split(/\s+/).map((p) => p.split(",").map(Number)) : null;
+  }, cls);
+
+test("restored (stale) samples are drawn dashed in their own line, with a restart marker and a note", async ({ page }) => {
+  await stubStatusHistory(page, [staleThenLive(300, 2 * 60 * 60 * 1000, 30)]); // saved 2 hours ago, then 1 minute of live data
+  await page.goto("/");
+  const graph = page.locator("#offset-sparkline");
+  await expect(graph.locator("polyline.sparkline-line-stale")).toHaveCount(1);
+  await expect(graph.locator("polyline.sparkline-line")).toHaveCount(1);
+  expect((await polyPoints(page, "sparkline-line-stale")).length).toBe(300);
+  expect((await polyPoints(page, "sparkline-line")).length).toBe(30);
+  await expect(graph.locator("line.sparkline-break")).toHaveCount(1);
+  await expect(graph.locator(".sparkline-stale-note")).toContainText("saved before the server restarted");
+  await expect(graph.locator(".sparkline-stale-note")).toContainText("nothing recorded for 1 h 5"); // ~1 h 59 min
+  await expect(graph.locator("circle.sparkline-dot")).toHaveCount(1); // the newest sample is live
+});
+
+test("a long outage is drawn as a short gap: stale block left of the marker, live data right of it, all on the axis", async ({ page }) => {
+  await stubStatusHistory(page, [staleThenLive(300, 2 * 60 * 60 * 1000, 30)]);
+  await page.goto("/");
+  await expect(page.locator("#offset-sparkline polyline.sparkline-line-stale")).toHaveCount(1);
+  const stale = await polyPoints(page, "sparkline-line-stale");
+  const live = await polyPoints(page, "sparkline-line");
+  const breakX = await page.evaluate(() => +document.querySelector("#offset-sparkline line.sparkline-break").getAttribute("x1"));
+  const staleXs = stale.map((p) => p[0]);
+  const liveXs = live.map((p) => p[0]);
+  expect(Math.min(...staleXs)).toBeGreaterThanOrEqual(46); // inside the plot area (left padding 46)
+  expect(Math.max(...staleXs)).toBeLessThan(breakX);
+  expect(breakX).toBeLessThan(Math.min(...liveXs));
+});
+
+test("with no fresh sample yet the graph shows only the saved data and says it is waiting", async ({ page }) => {
+  await stubStatusHistory(page, [staleThenLive(100, 5 * 60 * 1000, 0)]); // everything saved, newest 5 minutes old
+  await page.goto("/");
+  const graph = page.locator("#offset-sparkline");
+  await expect(graph.locator("polyline.sparkline-line-stale")).toHaveCount(1);
+  await expect(graph.locator("polyline.sparkline-line")).toHaveCount(0);
+  await expect(graph.locator("line.sparkline-break")).toHaveCount(0);
+  await expect(graph.locator("circle.sparkline-dot-stale")).toHaveCount(1);
+  await expect(graph.locator(".sparkline-stale-note")).toContainText("Waiting for fresh data");
+  await expect(graph.locator(".sparkline-caption")).toContainText("at the last saved sample");
+});
+
+test("without stale samples nothing is dashed and there is no marker or note", async ({ page }) => {
+  await stubStatusHistory(page, [{ epoch: 3, seq: 60, reset: true, samples: samples(60) }]);
+  await page.goto("/");
+  const graph = page.locator("#offset-sparkline");
+  await expect(graph.locator("polyline.sparkline-line")).toHaveCount(1);
+  await expect(graph.locator("polyline.sparkline-line-stale")).toHaveCount(0);
+  await expect(graph.locator("line.sparkline-break")).toHaveCount(0);
+  await expect(graph.locator(".sparkline-stale-note")).toHaveCount(0);
+});
+
+test("the linear time axis also shows the stale block dashed, with the marker between the two", async ({ page }) => {
+  await stubStatusHistory(page, [staleThenLive(200, 30 * 60 * 1000, 40)]);
+  await page.goto("/");
+  await expect(page.locator("#offset-sparkline polyline.sparkline-line-stale")).toHaveCount(1);
+  await page.locator("#toggle-t").click();
+  await expect(page.locator("#toggle-t")).toHaveText("Time: linear");
+  const graph = page.locator("#offset-sparkline");
+  await expect(graph.locator("polyline.sparkline-line-stale")).toHaveCount(1);
+  await expect(graph.locator("polyline.sparkline-line")).toHaveCount(1);
+  await expect(graph.locator("line.sparkline-break")).toHaveCount(1);
+  const stale = await polyPoints(page, "sparkline-line-stale");
+  const live = await polyPoints(page, "sparkline-line");
+  expect(Math.max(...stale.map((p) => p[0]))).toBeLessThan(Math.min(...live.map((p) => p[0])));
+});
+
+test("when fresh data pushes the saved samples out, the dashed line and the note go away", async ({ page }) => {
+  // the server drops the stale samples from its buffer as live ones arrive; a reset response carries only what is left
+  await stubStatusHistory(page, [
+    staleThenLive(50, 60 * 60 * 1000, 10),
+    { epoch: 5, seq: 90, reset: true, samples: samples(60, 31) },
+  ]);
+  await page.goto("/");
+  await expect(page.locator("#offset-sparkline polyline.sparkline-line-stale")).toHaveCount(1);
+  await expect(page.locator("#offset-sparkline polyline.sparkline-line-stale")).toHaveCount(0, { timeout: 8000 });
+  await expect(page.locator("#offset-sparkline .sparkline-stale-note")).toHaveCount(0);
 });

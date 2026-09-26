@@ -1,4 +1,6 @@
 const express = require("express");
+const fs = require("fs");
+const os = require("os");
 const path = require("path");
 
 const app = express();
@@ -22,6 +24,90 @@ let latest = null; // { at, data } from the last successful poll
 let lastError = "no data from the agent yet";
 let inflight = null;
 
+// ---- Persistence ---------------------------------------------------------------------------------------------
+// The buffer is saved to a file so a restart or a deploy does not empty the graph. The file must live OUTSIDE the app
+// folder: the deploy job runs `rsync --delete` into it. Default: ~/.local/state/gpsdash/history.json (the service user's
+// own state directory). HISTORY_FILE=<path> overrides it; HISTORY_FILE="" or "off" turns persistence off.
+function historyFilePath() {
+  const configured = process.env.HISTORY_FILE;
+  if (configured === "" || configured === "off") return null;
+  if (configured) return configured;
+  const stateHome = process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state");
+  return path.join(stateHome, "gpsdash", "history.json");
+}
+const HISTORY_FILE = historyFilePath();
+const SAVE_INTERVAL_MS = Number(process.env.HISTORY_SAVE_INTERVAL_MS) || 30000;
+// Restored samples are flagged `stale` (the page draws them dashed) when the newest one is older than this: a restart that
+// takes a few seconds is invisible, an outage of minutes or hours is shown as such.
+const RESTORED_STALE_AFTER_MS = Number(process.env.HISTORY_STALE_AFTER_MS) || 60000;
+let dirty = false; // samples recorded since the last save
+let saveErrorLogged = false;
+
+// Samples are stored with absolute timestamps, so after a restart their ages (and the gap while the server was down)
+// come out right. Old samples are KEPT, however old: after an outage the graph is still fully populated, and the samples
+// restored from disk are flagged stale so the page can show which part is old. Only invalid samples and ones stamped in
+// the future (a clock that was stepped) are dropped, and the buffer's capacity keeps the newest MAX_HISTORY.
+function loadHistory() {
+  if (!HISTORY_FILE) {
+    console.log("history persistence is off");
+    return;
+  }
+  let saved;
+  try {
+    saved = JSON.parse(fs.readFileSync(HISTORY_FILE, "utf8"));
+  } catch (err) {
+    if (err.code !== "ENOENT") console.log(`ignoring unreadable history file ${HISTORY_FILE}: ${err.message}`);
+    else console.log(`no saved history yet (${HISTORY_FILE})`);
+    return;
+  }
+  const now = Date.now();
+  const kept = (Array.isArray(saved && saved.samples) ? saved.samples : [])
+    .filter((x) => x && Number.isFinite(x.t) && Number.isFinite(x.offsetMs) && x.t <= now + 5000)
+    .sort((a, b) => a.t - b.t)
+    .slice(-MAX_HISTORY);
+  if (!kept.length) {
+    console.log(`saved history in ${HISTORY_FILE} was empty`);
+    return;
+  }
+  const newestAgeMs = now - kept[kept.length - 1].t;
+  const stale = newestAgeMs > RESTORED_STALE_AFTER_MS;
+  for (const x of kept) {
+    seq += 1;
+    history.push({ seq, t: x.t, offsetMs: x.offsetMs, stale });
+  }
+  console.log(
+    `restored ${kept.length} history samples from ${HISTORY_FILE} (newest ${Math.round(newestAgeMs / 1000)} s old` +
+      `${stale ? ", marked stale" : ""})`
+  );
+}
+
+// Written to a temporary file first and renamed into place, so a crash mid-write never leaves a half-written file.
+function saveHistory() {
+  if (!HISTORY_FILE) return;
+  const tmp = `${HISTORY_FILE}.${process.pid}.tmp`;
+  try {
+    fs.mkdirSync(path.dirname(HISTORY_FILE), { recursive: true });
+    const body = JSON.stringify({
+      version: 1,
+      savedAt: Date.now(),
+      windowMs: HISTORY_WINDOW_MS,
+      intervalMs: POLL_INTERVAL_MS,
+      samples: history.map(({ t, offsetMs }) => ({ t, offsetMs })),
+    });
+    fs.writeFileSync(tmp, body);
+    fs.renameSync(tmp, HISTORY_FILE);
+    dirty = false;
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch (e) {
+      // nothing to clean up
+    }
+    if (!saveErrorLogged) console.log(`could not save history to ${HISTORY_FILE}: ${err.message}`);
+    saveErrorLogged = true;
+  }
+}
+
 async function pollAgent() {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), agentTimeoutMs);
@@ -37,8 +123,9 @@ async function pollAgent() {
     const offsetSeconds = data && data.ntp && data.ntp.system_offset_seconds;
     if (typeof offsetSeconds === "number") {
       seq += 1;
-      history.push({ seq, t: now, offsetMs: offsetSeconds * 1000 });
+      history.push({ seq, t: now, offsetMs: offsetSeconds * 1000, stale: false });
       while (history.length > MAX_HISTORY) history.shift();
+      dirty = true;
     }
   } catch (err) {
     lastError = err.name === "AbortError" ? "the request timed out" : err.message;
@@ -63,7 +150,9 @@ function historySince(since, clientEpoch) {
     epoch,
     seq,
     reset,
-    samples: history.filter((s) => s.seq > from).map((s) => ({ seq: s.seq, ageMs: now - s.t, offsetMs: s.offsetMs })),
+    samples: history
+      .filter((s) => s.seq > from)
+      .map((s) => ({ seq: s.seq, ageMs: now - s.t, offsetMs: s.offsetMs, stale: s.stale })),
   };
 }
 
@@ -109,10 +198,23 @@ app.get("/api/status", async (req, res) => {
   res.json({ ...latest.data, history: historySince(since, req.query.epoch) });
 });
 
+loadHistory();
+
 app.listen(port, () => {
   console.log(`gpsdash listening on port ${port}`);
   refresh();
   setInterval(refresh, POLL_INTERVAL_MS);
+  setInterval(() => {
+    if (dirty) saveHistory();
+  }, SAVE_INTERVAL_MS);
 });
+
+// systemd stops the service with SIGTERM (a deploy restarts it): save what we have before exiting.
+function shutdown() {
+  saveHistory();
+  process.exit(0);
+}
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
 
 module.exports = app;
