@@ -59,13 +59,13 @@ The server reads these environment variables (all optional):
 | `HISTORY_WINDOW_MS` | `900000` (15 min) | How much clock-offset history the server keeps (window / interval samples). |
 | `HISTORY_FILE` | `~/.local/state/gpsdash/history.json` | Where the history is saved. `""` or `off` disables saving. Must be **outside** the app folder: the deploy job runs `rsync --delete` into it. |
 | `HISTORY_SAVE_INTERVAL_MS` | `30000` | How often the history is saved (it is also saved when the service stops). |
-| `HISTORY_STALE_AFTER_MS` | `60000` | After a restart, saved samples are drawn dashed as "stale" only if the newest one is older than this. |
+| `HISTORY_STALE_AFTER_MS` | `60000` | After a restart, saved samples are drawn as a solid yellow "stale" line only if the newest one is older than this. |
 
 ### Offset history
 
 The server keeps the last 15 minutes of clock-offset samples in memory and saves them to `HISTORY_FILE`, so a page reload, a new tab, a service restart or a deploy does not empty the graph. `GET /api/history` shows what the server holds; `GET /api/status?since=<seq>&epoch=<epoch>` returns the status plus the samples newer than `seq` (the page uses this to fetch only what is new).
 
-After a restart the saved samples are loaded however old they are, so the graph stays populated. If the newest saved sample is more than `HISTORY_STALE_AFTER_MS` old, the restored part is drawn as a dashed amber line with a "restart" marker and a note saying how long nothing was recorded, until fresh data pushes it out. A restart that takes only a few seconds is not flagged.
+After a restart the saved samples are loaded however old they are, so the graph stays populated. If the newest saved sample is more than `HISTORY_STALE_AFTER_MS` old, the restored part is drawn as a solid yellow line with a "restart" marker and a note saying how long nothing was recorded, until fresh data pushes it out. A restart that takes only a few seconds is not flagged.
 
 ## Deployment
 

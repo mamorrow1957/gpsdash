@@ -684,7 +684,7 @@ const polyPoints = (page, cls) =>
     return el ? el.getAttribute("points").trim().split(/\s+/).map((p) => p.split(",").map(Number)) : null;
   }, cls);
 
-test("restored (stale) samples are drawn dashed in their own line, with a restart marker and a note", async ({ page }) => {
+test("restored (stale) samples are drawn as a solid yellow line of their own, with a restart marker and a note", async ({ page }) => {
   await stubStatusHistory(page, [staleThenLive(300, 2 * 60 * 60 * 1000, 30)]); // saved 2 hours ago, then 1 minute of live data
   await page.goto("/");
   const graph = page.locator("#offset-sparkline");
@@ -693,8 +693,17 @@ test("restored (stale) samples are drawn dashed in their own line, with a restar
   expect((await polyPoints(page, "sparkline-line-stale")).length).toBe(300);
   expect((await polyPoints(page, "sparkline-line")).length).toBe(30);
   await expect(graph.locator("line.sparkline-break")).toHaveCount(1);
-  await expect(graph.locator(".sparkline-stale-note")).toContainText("saved before the server restarted");
+  await expect(graph.locator(".sparkline-stale-note")).toContainText("Yellow line: saved before the server restarted");
   await expect(graph.locator(".sparkline-stale-note")).toContainText("nothing recorded for 1 h 5"); // ~1 h 59 min
+  // the look: a solid line (no dashes) in yellow, and the note in the same yellow
+  const look = await page.evaluate(() => {
+    const line = getComputedStyle(document.querySelector("#offset-sparkline polyline.sparkline-line-stale"));
+    const note = getComputedStyle(document.querySelector("#offset-sparkline .sparkline-stale-note"));
+    return { stroke: line.stroke, dash: line.strokeDasharray, noteColor: note.color };
+  });
+  expect(look.dash).toBe("none");
+  expect(look.stroke).toBe("rgb(245, 211, 61)");
+  expect(look.noteColor).toBe("rgb(245, 211, 61)");
   await expect(graph.locator("circle.sparkline-dot")).toHaveCount(1); // the newest sample is live
 });
 
@@ -724,7 +733,7 @@ test("with no fresh sample yet the graph shows only the saved data and says it i
   await expect(graph.locator(".sparkline-caption")).toContainText("at the last saved sample");
 });
 
-test("without stale samples nothing is dashed and there is no marker or note", async ({ page }) => {
+test("without stale samples nothing is yellow and there is no marker or note", async ({ page }) => {
   await stubStatusHistory(page, [{ epoch: 3, seq: 60, reset: true, samples: samples(60) }]);
   await page.goto("/");
   const graph = page.locator("#offset-sparkline");
@@ -734,7 +743,7 @@ test("without stale samples nothing is dashed and there is no marker or note", a
   await expect(graph.locator(".sparkline-stale-note")).toHaveCount(0);
 });
 
-test("the linear time axis also shows the stale block dashed, with the marker between the two", async ({ page }) => {
+test("the linear time axis also shows the stale block in yellow, with the marker between the two", async ({ page }) => {
   await stubStatusHistory(page, [staleThenLive(200, 30 * 60 * 1000, 40)]);
   await page.goto("/");
   await expect(page.locator("#offset-sparkline polyline.sparkline-line-stale")).toHaveCount(1);
@@ -749,7 +758,7 @@ test("the linear time axis also shows the stale block dashed, with the marker be
   expect(Math.max(...stale.map((p) => p[0]))).toBeLessThan(Math.min(...live.map((p) => p[0])));
 });
 
-test("when fresh data pushes the saved samples out, the dashed line and the note go away", async ({ page }) => {
+test("when fresh data pushes the saved samples out, the yellow line and the note go away", async ({ page }) => {
   // the server drops the stale samples from its buffer as live ones arrive; a reset response carries only what is left
   await stubStatusHistory(page, [
     staleThenLive(50, 60 * 60 * 1000, 10),

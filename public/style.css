@@ -3,6 +3,7 @@
   --text-muted: #898781;
   --status-good: #0ca30c;
   --status-warning: #fab219;
+  --series-stale: #f5d33d; /* the clock-offset line restored from before a server restart */
   --status-serious: #ec835a;
   --status-critical: #e66767;
 }
@@ -270,14 +271,13 @@ tr.state-rejected {
   stroke-linecap: round;
 }
 
-/* data the server restored from disk after a restart: dashed and a different colour until fresh data pushes it out */
+/* data the server restored from disk after a restart: a solid yellow line until fresh data pushes it out */
 .sparkline-line-stale {
   fill: none;
-  stroke: var(--status-warning);
+  stroke: var(--series-stale);
   stroke-width: 2;
-  stroke-dasharray: 5 4;
   stroke-linejoin: round;
-  opacity: 0.8;
+  stroke-linecap: round;
 }
 
 .sparkline-break {
@@ -289,13 +289,13 @@ tr.state-rejected {
 
 .sparkline-dot-stale {
   fill: none;
-  stroke: var(--status-warning);
+  stroke: var(--series-stale);
   stroke-width: 2;
 }
 
 .sparkline-stale-note {
   text-align: center;
-  color: var(--status-warning);
+  color: var(--series-stale);
   font-size: 0.75rem;
   margin-top: 0.2rem;
 }

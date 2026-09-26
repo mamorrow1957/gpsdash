@@ -8,7 +8,7 @@ const FIX_MODE_LABELS = { 0: "Unknown", 1: "No fix", 2: "2D fix", 3: "3D fix" };
 
 const offsetHistory = []; // offsets in ms, oldest first
 const offsetTimes = []; // poll timestamps (ms since epoch), parallel to offsetHistory
-const offsetStale = []; // parallel: true for samples the server restored from disk after a restart (drawn dashed)
+const offsetStale = []; // parallel: true for samples the server restored from disk after a restart (drawn as a solid yellow line)
 
 // The server owns the offset history (so a reload shows the whole window at once, and every viewer sees the same one);
 // the page only keeps a copy to draw. Each poll sends the newest sample we hold (historySeq) and the server run it came
@@ -506,14 +506,14 @@ function renderOffsetSparkline() {
       `<line x1="${xm}" x2="${xm}" y1="${padT}" y2="${h - padB}" class="sparkline-break" />` +
       `<text x="${xm}" y="${padT + 8}" text-anchor="middle" class="sparkline-tick">restart</text>`;
     const downMs = offsetTimes[staleCount] - offsetTimes[staleCount - 1];
-    note = `Dashed: saved before the server restarted · nothing recorded for ${fmtDuration(downMs)}`;
+    note = `Yellow line: saved before the server restarted · nothing recorded for ${fmtDuration(downMs)}`;
   } else if (staleCount === n) {
     note = `Waiting for fresh data · the saved samples are up to ${fmtDuration(Date.now() - offsetTimes[n - 1])} old`;
   }
   const aria =
     `System clock offset over the last ${xAxis.spanText}; ` +
     `value axis ${graphMode.yLog ? "logarithmic" : "linear"}, time axis ${graphMode.tLog ? "logarithmic" : "linear"}` +
-    (staleCount ? "; the dashed part was saved before the server restarted" : "");
+    (staleCount ? "; the yellow part was saved before the server restarted" : "");
   el.innerHTML = `
     <svg viewBox="0 0 ${w} ${h}" class="sparkline-svg" role="img" aria-label="${aria}">
       ${yAxis.grid}

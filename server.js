@@ -37,7 +37,7 @@ function historyFilePath() {
 }
 const HISTORY_FILE = historyFilePath();
 const SAVE_INTERVAL_MS = Number(process.env.HISTORY_SAVE_INTERVAL_MS) || 30000;
-// Restored samples are flagged `stale` (the page draws them dashed) when the newest one is older than this: a restart that
+// Restored samples are flagged `stale` (the page draws them as a yellow line) when the newest one is older than this: a restart that
 // takes a few seconds is invisible, an outage of minutes or hours is shown as such.
 const RESTORED_STALE_AFTER_MS = Number(process.env.HISTORY_STALE_AFTER_MS) || 60000;
 let dirty = false; // samples recorded since the last save
