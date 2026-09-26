@@ -1,6 +1,6 @@
 # gpsdash
 
-Status dashboard for `ntp.local`, a Raspberry Pi running chrony with a USB GPS receiver attached. Note: the GPS is not currently disciplining chrony (no PPS signal available from this receiver, so its timing jitter is too high for chrony to select it over network NTP sources) — the dashboard shows this honestly rather than implying GPS-disciplined time.
+Status dashboard for `ntp.local`, a Raspberry Pi running chrony with a USB GPS receiver (u-blox 7) attached. Note: chrony currently selects the GPS as its reference (stratum 1, `refclock SHM 0 ... prefer` fed by gpsd, with a fixed offset correction in `chrony.conf`), so the dashboard's "GPS-disciplined" light is on. That light only means the GPS is the source chrony has selected right now. The receiver has no PPS signal (`/dev/pps0` exists but delivers no pulses), so the time comes from the serial NMEA data and is only as accurate as that path: chrony estimates ±100 ms for it, and in practice it agrees with the internet NTP sources to within about 10 ms. A receiver with real PPS would need a `refclock PPS /dev/pps0 lock GPS` line.
 
 ## What it is
 
