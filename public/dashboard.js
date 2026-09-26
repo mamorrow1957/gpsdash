@@ -118,6 +118,30 @@ function renderSources(sources) {
 
 const SKY_SIZE = 220;
 
+// Sort satellites into the groups the plot and legend show, so the legend always adds up to the total.
+//  - used:       in the position fix
+//  - unused:     above the horizon, signal heard, but not used in the fix
+//  - noSignal:   above the horizon, but no signal heard (SNR 0/unknown), e.g. a geostationary satellite not being tracked
+//  - below:      a valid position, below the horizon
+//  - noPosition: gpsd knows the satellite exists but has no position for it (it reports az 0, el -999)
+function classifySatellites(satellites) {
+  const g = { used: [], unused: [], noSignal: [], below: [], noPosition: [] };
+  for (const s of satellites) {
+    const valid =
+      Number.isFinite(s.el) && Number.isFinite(s.az) && s.el >= -90 && s.el <= 90 && s.az >= 0 && s.az <= 360;
+    if (!valid) g.noPosition.push(s);
+    else if (s.el < 0) g.below.push(s);
+    else if (s.used) g.used.push(s);
+    else if (s.ss > 0) g.unused.push(s);
+    else g.noSignal.push(s);
+  }
+  return g;
+}
+
+function prnList(sats) {
+  return sats.map((s) => s.prn).join(", ");
+}
+
 function renderSkyPlot(satellites) {
   const el = document.getElementById("sky-plot");
   if (!satellites || satellites.length === 0) {
@@ -131,20 +155,24 @@ function renderSkyPlot(satellites) {
     const ringR = r * (1 - elDeg / 90);
     return `<circle cx="${cx}" cy="${cy}" r="${ringR.toFixed(1)}" class="sky-ring" />`;
   }).join("");
-  const dots = satellites
-    .filter((s) => s.el !== null && s.el !== undefined && s.az !== null && s.az !== undefined)
-    .map((s) => {
-      const radius = r * (1 - s.el / 90);
-      const azRad = (s.az * Math.PI) / 180;
-      const x = cx + radius * Math.sin(azRad);
-      const y = cy - radius * Math.cos(azRad);
-      const cls = s.used ? "sky-dot-used" : "sky-dot-unused";
-      const snr = s.ss !== null && s.ss !== undefined ? `${s.ss.toFixed(0)} dB` : "no signal";
-      return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="5" class="${cls}"><title>PRN ${s.prn} · el ${s.el.toFixed(0)}° · az ${s.az.toFixed(0)}° · ${snr}${s.used ? " · used in fix" : ""}</title></circle>`;
-    })
-    .join("");
-  const usedCount = satellites.filter((s) => s.used).length;
-  const unusedCount = satellites.length - usedCount;
+  const groups = classifySatellites(satellites);
+  const dotFor = (s, cls) => {
+    const radius = r * (1 - s.el / 90);
+    const azRad = (s.az * Math.PI) / 180;
+    const x = cx + radius * Math.sin(azRad);
+    const y = cy - radius * Math.cos(azRad);
+    const snr = s.ss !== null && s.ss !== undefined && s.ss > 0 ? `${s.ss.toFixed(0)} dB` : "no signal";
+    return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="5" class="${cls}"><title>PRN ${s.prn} · el ${s.el.toFixed(0)}° · az ${s.az.toFixed(0)}° · ${snr}${s.used ? " · used in fix" : ""}</title></circle>`;
+  };
+  // Not-used dots go underneath the used ones, so a used satellite is never hidden behind a grey one.
+  const dots =
+    groups.noSignal.map((s) => dotFor(s, "sky-dot-nosignal")).join("") +
+    groups.unused.map((s) => dotFor(s, "sky-dot-unused")).join("") +
+    groups.used.map((s) => dotFor(s, "sky-dot-used")).join("");
+  const legendItem = (cls, label, sats) => `<span><i class="dot ${cls}"></i> ${label} (${sats.length})</span>`;
+  const notes = [];
+  if (groups.noPosition.length) notes.push(`No position reported: PRN ${prnList(groups.noPosition)}`);
+  if (groups.below.length) notes.push(`Below the horizon: PRN ${prnList(groups.below)}`);
   el.innerHTML = `
     <svg viewBox="0 0 ${SKY_SIZE} ${SKY_SIZE}" class="sky-svg" role="img" aria-label="Satellite sky view, North at top">
       <circle cx="${cx}" cy="${cy}" r="${r}" class="sky-horizon" />
@@ -156,9 +184,13 @@ function renderSkyPlot(satellites) {
       ${dots}
     </svg>
     <div class="legend">
-      <span><i class="dot dot-used"></i> Used (${usedCount})</span>
-      <span><i class="dot dot-unused"></i> Not used (${unusedCount})</span>
+      ${legendItem("dot-used", "Used", groups.used)}
+      ${legendItem("dot-unused", "Not used", groups.unused)}
+      ${groups.noSignal.length ? legendItem("dot-nosignal", "No signal", groups.noSignal) : ""}
+      ${groups.below.length ? legendItem("dot-below", "Below horizon", groups.below) : ""}
+      ${groups.noPosition.length ? legendItem("dot-noposition", "No position", groups.noPosition) : ""}
     </div>
+    ${notes.length ? `<div class="sky-note">${notes.join(" · ")}</div>` : ""}
   `;
 }
 

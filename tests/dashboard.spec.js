@@ -37,9 +37,17 @@ const STATUS = {
   sources: [],
 };
 
-async function stubStatus(page, offsetSeconds) {
+async function stubStatus(page, offsetSeconds, satellites) {
+  const gps = satellites
+    ? {
+        ...STATUS.gps,
+        satellites,
+        satellites_visible: satellites.length,
+        satellites_used: satellites.filter((sat) => sat.used).length,
+      }
+    : STATUS.gps;
   await page.route("**/api/status", (route) =>
-    route.fulfill({ json: { ...STATUS, ntp: { ...STATUS.ntp, system_offset_seconds: offsetSeconds } } })
+    route.fulfill({ json: { ...STATUS, gps, ntp: { ...STATUS.ntp, system_offset_seconds: offsetSeconds } } })
   );
 }
 
@@ -101,4 +109,62 @@ test("the graph keeps 15 minutes of samples", async ({ page }) => {
   await expect(page.locator("#offset-sparkline svg")).toBeVisible();
   const cap = await page.evaluate(() => ({ max: MAX_OFFSET_HISTORY, windowMs: OFFSET_HISTORY_WINDOW_MS, poll: POLL_INTERVAL_MS }));
   expect(cap).toEqual({ max: 450, windowMs: 15 * 60 * 1000, poll: 2000 });
+});
+
+// ---- Sky view ---------------------------------------------------------------------------------
+// gpsd reports satellites it has no position for as az 0 / el -999. They must not be drawn off the canvas, and the
+// legend must add up to every satellite in the list.
+const SKY_SATELLITES = [
+  { prn: 5, az: 77, el: 21, ss: 33, used: true },
+  { prn: 15, az: 48, el: 69, ss: 27, used: true },
+  { prn: 27, az: 318, el: 12, ss: 25, used: false }, // above the horizon, heard, not used
+  { prn: 46, az: 201, el: 43, ss: 0, used: false }, // above the horizon, no signal
+  { prn: 30, az: 100, el: -5, ss: 0, used: false }, // below the horizon
+  { prn: 193, az: 0, el: -999, ss: 0, used: false }, // gpsd's "no position"
+  { prn: 197, az: 0, el: -999, ss: 0, used: false },
+  { prn: 199, az: null, el: null, ss: null, used: false }, // position missing entirely
+];
+
+test("sky view legend accounts for every satellite and only plots ones that have a position", async ({ page }) => {
+  await stubStatus(page, 0.00002, SKY_SATELLITES);
+  await page.goto("/");
+  const sky = page.locator("#sky-plot");
+  await expect(sky.locator("svg")).toBeVisible();
+  const legend = sky.locator(".legend");
+  await expect(legend).toContainText("Used (2)");
+  await expect(legend).toContainText("Not used (1)");
+  await expect(legend).toContainText("No signal (1)");
+  await expect(legend).toContainText("Below horizon (1)");
+  await expect(legend).toContainText("No position (3)");
+  // 2 + 1 + 1 + 1 + 3 = 8 = every satellite in the list
+  await expect(sky.locator("circle.sky-dot-used")).toHaveCount(2);
+  await expect(sky.locator("circle.sky-dot-unused")).toHaveCount(1);
+  await expect(sky.locator("circle.sky-dot-nosignal")).toHaveCount(1);
+  await expect(sky.locator(".sky-note")).toContainText("No position reported: PRN 193, 197, 199");
+  await expect(sky.locator(".sky-note")).toContainText("Below the horizon: PRN 30");
+});
+
+test("every plotted satellite dot lies inside the sky view canvas", async ({ page }) => {
+  await stubStatus(page, 0.00002, SKY_SATELLITES);
+  await page.goto("/");
+  await expect(page.locator("#sky-plot svg")).toBeVisible();
+  const outside = await page.evaluate(() => {
+    const svg = document.querySelector("#sky-plot svg");
+    const vb = svg.viewBox.baseVal;
+    return [...svg.querySelectorAll("circle.sky-dot-used, circle.sky-dot-unused, circle.sky-dot-nosignal")]
+      .map((c) => ({ x: +c.getAttribute("cx"), y: +c.getAttribute("cy") }))
+      .filter((d) => d.x < 0 || d.x > vb.width || d.y < 0 || d.y > vb.height).length;
+  });
+  expect(outside).toBe(0);
+});
+
+test("sky view omits the extra legend items when every satellite has a position and a signal", async ({ page }) => {
+  await stubStatus(page, 0.00002, SKY_SATELLITES.slice(0, 3));
+  await page.goto("/");
+  const legend = page.locator("#sky-plot .legend");
+  await expect(legend).toContainText("Used (2)");
+  await expect(legend).toContainText("Not used (1)");
+  await expect(legend).not.toContainText("No signal");
+  await expect(legend).not.toContainText("No position");
+  await expect(page.locator("#sky-plot .sky-note")).toHaveCount(0);
 });

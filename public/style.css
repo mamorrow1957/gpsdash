@@ -171,8 +171,9 @@ tr.state-rejected {
 
 .legend {
   display: flex;
+  flex-wrap: wrap;
   justify-content: center;
-  gap: 1.25rem;
+  gap: 0.4rem 1.25rem;
   margin-top: 0.5rem;
   font-size: 0.85rem;
   color: var(--text-muted);
@@ -193,6 +194,37 @@ tr.state-rejected {
 .dot-unused {
   background: var(--text-muted);
   opacity: 0.6;
+}
+
+.sky-dot-nosignal {
+  fill: none;
+  stroke: var(--text-muted);
+  stroke-width: 1.5;
+  opacity: 0.8;
+}
+
+.legend .dot-nosignal {
+  background: transparent;
+  border: 1.5px solid var(--text-muted);
+  width: 7px;
+  height: 7px;
+  opacity: 0.8;
+}
+
+/* satellites that cannot be placed on the plot get a dashed outline in the legend */
+.legend .dot-noposition,
+.legend .dot-below {
+  background: transparent;
+  border: 1px dashed var(--text-muted);
+  width: 7px;
+  height: 7px;
+}
+
+.sky-note {
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  margin-top: 0.35rem;
 }
 
 .sparkline-svg {
