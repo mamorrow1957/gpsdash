@@ -99,11 +99,14 @@ function renderNtp(ntp, sources) {
     el.innerHTML = "<p class='error'>No NTP data</p>";
     return;
   }
-  const gpsSource = (sources || []).find((s) => s.name === "GPS");
-  const gpsSelected = gpsSource && gpsSource.state === "selected";
-  const disciplineStat = gpsSelected
-    ? { level: "good", label: "Yes" }
-    : { level: "warning", label: "No — using network NTP" };
+  // chrony can be locked to GPS either through the serial time (source "GPS") or, with a PPS board, through the pulse
+  // (source "PPS", with "GPS" then only labelling the second and shown as unusable). Either one selected counts.
+  const gpsSelected = (sources || []).find((s) => (s.name === "PPS" || s.name === "GPS") && s.state === "selected");
+  const disciplineStat = !gpsSelected
+    ? { level: "warning", label: "No — using network NTP" }
+    : gpsSelected.name === "PPS"
+      ? { level: "good", label: "Yes — GPS pulse (PPS)" }
+      : { level: "good", label: "Yes — GPS serial time (no PPS)" };
   el.innerHTML = `
     <dl>
       <dt>Reference</dt><dd>${ntp.reference_name} (stratum ${ntp.stratum})</dd>
@@ -120,12 +123,13 @@ function renderSources(sources) {
     el.innerHTML = "<p class='error'>No source data</p>";
     return;
   }
+  const ppsSelected = sources.some((x) => x.name === "PPS" && x.state === "selected");
   const rows = sources
     .map(
       (s) => `
       <tr class="state-${s.state}">
         <td>${s.name}</td>
-        <td>${s.state}</td>
+        <td>${s.name === "GPS" && s.state === "unusable" && ppsSelected ? "label only (by design)" : s.state}</td>
         <td>${s.stratum}</td>
         <td>${fmtOffset(s.adjusted_offset_seconds)}</td>
         <td>${fmtOffset(s.estimated_error_seconds)}</td>
@@ -317,7 +321,7 @@ function niceStep(range) {
 
 // ---- Clock-offset graph -----------------------------------------------------------------
 const GRAPH = { w: 320, h: 128, padL: 46, padR: 8, padT: 10, padB: 18 };
-const LOG_Y_FLOOR_MS = 0.001; // symmetric-log: values within ~1 µs of zero stay roughly linear
+const LOG_Y_FLOOR_MS = 0.0001; // symmetric-log: values within ~100 ns of zero stay roughly linear (PPS-disciplined clock)
 const LOG_T_TAU_S = 8; // log time axis: the newest seconds get the most room
 const TIME_TICKS = [
   [0, "now"],
@@ -334,6 +338,7 @@ function fmtTickMs(ms) {
   if (ms === 0) return "0";
   const a = Math.abs(ms);
   const sign = ms > 0 ? "+" : "-";
+  if (a < 0.001) return `${sign}${(a * 1e6).toFixed(0)}ns`;
   if (a < 1) return `${sign}${(a * 1000).toFixed(0)}µs`;
   if (a < 1000) return `${sign}${a.toFixed(0)}ms`;
   return `${sign}${(a / 1000).toFixed(0)}s`;
@@ -342,6 +347,7 @@ function fmtTickMs(ms) {
 // Unit for the caption, chosen from the size of the numbers (an 18 µs offset should not read "0.0 ms").
 function pickUnit(ms) {
   const a = Math.abs(ms);
+  if (a < 0.001) return { unit: "ns", k: 1e6 };
   if (a < 1) return { unit: "µs", k: 1000 };
   if (a < 1000) return { unit: "ms", k: 1 };
   return { unit: "s", k: 0.001 };
@@ -379,20 +385,20 @@ function linearValueAxis(values) {
   return { toY, grid };
 }
 
-// Value axis, symmetric log: zero in the middle, decade ticks (±10 µs, ±100 µs, ±1 ms, ...) each side.
+// Value axis, symmetric log: zero in the middle, decade ticks (±1 µs, ±10 µs, ±100 µs, ±1 ms, ...) each side.
 function logValueAxis(values) {
   const { h, padT, padB } = GRAPH;
   const maxAbs = Math.max(...values.map(Math.abs), 0);
-  let topExp = -2; // never zoom in past ±10 µs
+  let topExp = -3; // never zoom in past ±1 µs
   while (Math.pow(10, topExp) < maxAbs && topExp < 4) topExp++;
   const top = Math.pow(10, topExp);
   const yMax = symlog(top);
   const plotH = h - padT - padB;
   const toY = (v) => padT + (1 - (symlog(Math.max(-top, Math.min(top, v))) + yMax) / (2 * yMax)) * plotH;
   let grid = gridLine(toY(0), "sparkline-zero") + tickLabel(toY(0), "0");
-  for (let k = -3; k <= topExp; k++) {
+  for (let k = -4; k <= topExp; k++) {
     const v = Math.pow(10, k);
-    const labelled = k >= -2; // the ±1 µs lines are minor: drawn, but not labelled
+    const labelled = k >= -3; // the ±100 ns lines are minor: drawn, but not labelled
     for (const s of [1, -1]) {
       grid += gridLine(toY(s * v), "sparkline-grid");
       if (labelled) grid += tickLabel(toY(s * v), fmtTickMs(s * v));
