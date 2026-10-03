@@ -1062,3 +1062,28 @@ test("the sources table updates its numbers in place, so a hover tooltip survive
   expect(await handle.evaluate((el) => el.isConnected)).toBe(true); // the name cell is the same element, not a copy
   await expect(firstName).toHaveAttribute("title", "192.0.2.10");
 });
+
+// ---- GPS quality (HDOP) -------------------------------------------------------------------------------------------
+test("the GPS quality line uses the six HDOP titles, with the right dot colour at each boundary", async ({ page }) => {
+  await page.route("**/api/status*", (route) => route.fulfill({ json: STATUS }));
+  await page.goto("/");
+  const cases = [
+    [0.66, "Ideal (HDOP 0.66)", "good"],
+    [1.0, "Excellent (HDOP 1.00)", "good"],
+    [1.99, "Excellent (HDOP 1.99)", "good"],
+    [2.0, "Good (HDOP 2.00)", "good"],
+    [4.99, "Good (HDOP 4.99)", "good"],
+    [5.0, "Moderate (HDOP 5.00)", "warning"],
+    [9.99, "Moderate (HDOP 9.99)", "warning"],
+    [10.0, "Fair (HDOP 10.00)", "serious"],
+    [19.99, "Fair (HDOP 19.99)", "serious"],
+    [20.0, "Poor (HDOP 20.00)", "critical"],
+  ];
+  for (const [value, label, level] of cases) {
+    expect(await page.evaluate((h) => hdopStatus(h), value)).toEqual({ level, label });
+  }
+  expect(await page.evaluate(() => hdopStatus(undefined))).toEqual({ level: "critical", label: "No HDOP data" });
+  // and end to end: the page shows it (the stub has HDOP 1.0)
+  await expect(page.locator("#gps-panel dd.status-line").first()).toHaveText("Excellent (HDOP 1.00)");
+  await expect(page.locator("#gps-panel dd.status-line .status-dot").first()).toHaveClass(/status-good/);
+});

@@ -67,12 +67,16 @@ function statusDot(level, label) {
   return `<span class="status-dot status-${level}" aria-hidden="true"></span><span>${label}</span>`;
 }
 
+// The usual six-level HDOP scale (lower is better). The dot has four colours: the top three titles are all green.
 function hdopStatus(hdop) {
   if (hdop === undefined || hdop === null) return { level: "critical", label: "No HDOP data" };
-  if (hdop < 2) return { level: "good", label: `Good (HDOP ${hdop.toFixed(2)})` };
-  if (hdop < 5) return { level: "warning", label: `Fair (HDOP ${hdop.toFixed(2)})` };
-  if (hdop < 10) return { level: "serious", label: `Moderate (HDOP ${hdop.toFixed(2)})` };
-  return { level: "critical", label: `Poor (HDOP ${hdop.toFixed(2)})` };
+  const value = hdop.toFixed(2);
+  if (hdop < 1) return { level: "good", label: `Ideal (HDOP ${value})` };
+  if (hdop < 2) return { level: "good", label: `Excellent (HDOP ${value})` };
+  if (hdop < 5) return { level: "good", label: `Good (HDOP ${value})` };
+  if (hdop < 10) return { level: "warning", label: `Moderate (HDOP ${value})` };
+  if (hdop < 20) return { level: "serious", label: `Fair (HDOP ${value})` };
+  return { level: "critical", label: `Poor (HDOP ${value})` };
 }
 
 function renderGps(gps) {
