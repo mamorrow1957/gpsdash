@@ -1,6 +1,7 @@
 :root {
   --series-1: #3987e5;
   --text-muted: #898781;
+  --status-ideal: #3987e5; /* blue: better than green */
   --status-good: #0ca30c;
   --status-warning: #fab219;
   --series-stale: #f5d33d; /* the clock-offset line restored from before a server restart */
@@ -89,6 +90,10 @@ dd {
   height: 10px;
   border-radius: 50%;
   flex-shrink: 0;
+}
+
+.status-ideal {
+  background: var(--status-ideal);
 }
 
 .status-good {

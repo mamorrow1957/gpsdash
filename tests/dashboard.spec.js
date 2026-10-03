@@ -1068,7 +1068,8 @@ test("the GPS quality line uses the six HDOP titles, with the right dot colour a
   await page.route("**/api/status*", (route) => route.fulfill({ json: STATUS }));
   await page.goto("/");
   const cases = [
-    [0.66, "Ideal (HDOP 0.66)", "good"],
+    [0.66, "Ideal (HDOP 0.66)", "ideal"],
+    [0.99, "Ideal (HDOP 0.99)", "ideal"],
     [1.0, "Excellent (HDOP 1.00)", "good"],
     [1.99, "Excellent (HDOP 1.99)", "good"],
     [2.0, "Good (HDOP 2.00)", "good"],
@@ -1086,4 +1087,8 @@ test("the GPS quality line uses the six HDOP titles, with the right dot colour a
   // and end to end: the page shows it (the stub has HDOP 1.0)
   await expect(page.locator("#gps-panel dd.status-line").first()).toHaveText("Excellent (HDOP 1.00)");
   await expect(page.locator("#gps-panel dd.status-line .status-dot").first()).toHaveClass(/status-good/);
+  // Ideal gets its own (blue) dot, distinct from green
+  const colour = async (cls) => page.evaluate((c) => { const el = document.createElement("span"); el.className = `status-dot ${c}`; document.body.append(el); const v = getComputedStyle(el).backgroundColor; el.remove(); return v; }, cls);
+  expect(await colour("status-ideal")).toBe("rgb(57, 135, 229)");
+  expect(await colour("status-ideal")).not.toBe(await colour("status-good"));
 });
