@@ -1,12 +1,20 @@
 # gpsdash
 
-Status dashboard for `ntp.local`, a Raspberry Pi 4 running chrony and gpsd, disciplined by an Uputronics GPS/RTC Expansion Board (a u-blox M8 receiver on the header UART at 115200 baud) and the board's once-per-second pulse on GPIO 18 (`pps-gpio`, exposed as `/dev/pps-gps`). chrony takes the second from the serial data (`refclock SHM 0 refid GPS ... noselect`) and the exact edge from the pulse (`refclock PPS /dev/pps-gps refid PPS lock GPS prefer`), so it reports stratum 1 with the clock within a few microseconds of GPS time. The dashboard's "GPS-disciplined" light is on when either the `PPS` or the `GPS` source is the one chrony has selected, and says which; with the board, the `GPS` source is listed after `PPS` as "label only (by design)" (it only labels the second). The Sources table words chrony's states in plain English, and shows a network server's reverse-DNS name when the dashboard server finds one (looked up in the background and cached; the IP address is in the hover text and is the fallback). The board's hardware clock (RV-3028) keeps the time across restarts. Before 2026-10-02 the receiver was a USB u-blox 7 puck without PPS (serial time only, about ±100 ms).
+Status dashboard for `ntp.local`, a Raspberry Pi 4 running chrony and gpsd, disciplined by an Uputronics GPS/RTC Expansion Board (a u-blox M8 receiver on the header UART at 115200 baud) and the board's once-per-second pulse on GPIO 18 (`pps-gpio`, exposed as `/dev/pps-gps`). chrony takes the second from the serial data (`refclock SHM 0 refid GPS ... noselect`) and the exact edge from the pulse (`refclock PPS /dev/pps-gps refid PPS lock GPS prefer`), so it reports stratum 1 with the clock within a few microseconds of GPS time. The board's hardware clock (RV-3028) keeps the time across restarts. Before 2026-10-02 the receiver was a USB u-blox 7 puck without PPS (serial time only, about ±100 ms).
 
 ## What it is
 
 Two pieces:
 - **Dashboard** (this repo's root) — an Express app that polls the agent on `ntp.local` and serves a live status page.
 - **Agent** (`agent/`) — a small Python HTTP service that runs on `ntp.local` itself, exposing chrony tracking/sources and gpsd fix data as JSON.
+
+## What the page shows
+
+- **GPS** — fix type, satellites used/visible, position, altitude, and a **Quality** line from HDOP (lower is better) with the usual six titles: Ideal (under 1, blue dot), Excellent (under 2) and Good (under 5) in green, Moderate (under 10) yellow, Fair (under 20) orange, Poor red.
+- **NTP** — the reference chrony is using, system offset, leap status and a **GPS-disciplined** light. It is on when either the `PPS` or the `GPS` source is the one chrony has selected, and says which.
+- **Sky view** — every satellite gpsd reports, one shape per constellation (GPS, SBAS, GLONASS, …) in the constellation's colour; solid = used in the fix, translucent = not used, dashed ring = no signal. Satellites below the horizon or without a position are counted in the legend but not plotted.
+- **Clock offset** — the last 15 minutes of offset, with `Value` and `Time` toggles (log or linear; defaults linear value, log time; remembered per browser). The log value axis goes down to 100 ns. Yellow marks time with no data (see below).
+- **Sources** — chrony's sources, `PPS` first, then `GPS`, then the network servers in chrony's order (the sort is display-only). chrony's states are worded in plain English (selected, blended in, backup, not used, rejected, too jittery, unusable) with a hover explanation. With the board, `GPS` reads "label only (by design)": it is `noselect` and only tells PPS which second each pulse belongs to. A network server shows its reverse-DNS name when the dashboard server finds one (looked up in the background, cached for an hour, misses for ten minutes, plain hostname characters only); the IP address is in the hover text and is the fallback. The table's numbers update in place so a hover tooltip survives the redraws.
 
 ## Project layout
 
@@ -37,6 +45,8 @@ npm start
 
 Then open `http://localhost:3000`.
 
+By default the server polls `http://ntp.local:8081/status`. If Node cannot reach it by that name (`.local` names can resolve to IPv6 first and give a 502), set `AGENT_URL` to the agent's IP address, for example `AGENT_URL=http://<agent-ip>:8081/status npm start`.
+
 ## Testing
 
 Tests use [Playwright](https://playwright.dev/) and run against a locally started server.
@@ -58,6 +68,7 @@ The dashboard server reads these environment variables (all optional):
 | `AGENT_HISTORY_URL` | `AGENT_URL` with `/status` replaced by `/history` | Where the agent serves its clock-offset history. |
 | `POLL_INTERVAL_MS` | `2000` | How often the server polls the agent. It is the only thing that talks to the agent: `/api/status` serves the cached poll. |
 | `HISTORY_WINDOW_MS` | `900000` (15 min) | Size of the server's in-memory copy of the history (window / interval samples). |
+| `RDNS_OVERRIDE` | unset | JSON `{"ip": "name"}` used instead of reverse DNS for the Sources table. For tests. |
 
 The agent (`agent/server.py`) reads:
 
