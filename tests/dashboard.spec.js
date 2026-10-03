@@ -258,7 +258,7 @@ async function freePort() {
   });
 }
 
-async function startFakeAgent({ offsetFor = (n) => 0.001 * (n + 1), sampleMs = 50, withHistory = true } = {}) {
+async function startFakeAgent({ offsetFor = (n) => 0.001 * (n + 1), sampleMs = 50, withHistory = true, sources = [] } = {}) {
   const st = { seq: 0, epoch: Date.now(), samples: [], frozen: false, blackout: false, statusCalls: 0, historyCalls: 0, lastOffsetS: 0 };
   const tick = () => {
     if (st.frozen) return; // the agent itself is down: it neither samples nor answers
@@ -279,7 +279,7 @@ async function startFakeAgent({ offsetFor = (n) => 0.001 * (n + 1), sampleMs = 5
     if (st.frozen || st.blackout) return send(503, { error: "simulated outage" });
     if (url.pathname === "/status") {
       st.statusCalls += 1;
-      return send(200, { ...STATUS, ntp: { ...STATUS.ntp, system_offset_seconds: st.lastOffsetS } });
+      return send(200, { ...STATUS, sources, ntp: { ...STATUS.ntp, system_offset_seconds: st.lastOffsetS } });
     }
     if (url.pathname === "/history" && withHistory) {
       st.historyCalls += 1;
@@ -961,4 +961,104 @@ test("samples the agent restored from its disk are drawn as ordinary data, not y
   await page.goto("/");
   await expect(page.locator("#offset-sparkline polyline.sparkline-line")).toHaveCount(1);
   expect(await polylineCount(page, "sparkline-line-gap")).toBe(0);
+});
+
+
+// ---- Sources table --------------------------------------------------------------------------------------------------
+const SOURCES = [
+  { name: "GPS", state: "unusable", stratum: 0, adjusted_offset_seconds: 0.087, estimated_error_seconds: 0.2 },
+  { name: "PPS", state: "selected", stratum: 0, adjusted_offset_seconds: -0.0000015, estimated_error_seconds: 0.0000006 },
+  { name: "192.0.2.10", state: "not_combined", stratum: 2, adjusted_offset_seconds: -0.0005, estimated_error_seconds: 0.05 },
+  { name: "192.0.2.20", state: "not_combined", stratum: 3, adjusted_offset_seconds: 0.0012, estimated_error_seconds: 0.02 },
+];
+
+test("the sources table lists PPS first, then GPS, then the network servers in chrony's order", async ({ page }) => {
+  await page.route("**/api/status*", (route) => route.fulfill({ json: { ...STATUS, sources: SOURCES } }));
+  await page.goto("/");
+  const names = page.locator("#sources-panel tbody tr td:first-child");
+  await expect(names).toHaveText(["PPS", "GPS", "192.0.2.10", "192.0.2.20"]);
+});
+
+test("the GPS source row says it is label only while PPS is selected, and shows chrony's state otherwise", async ({ page }) => {
+  await page.route("**/api/status*", (route) => route.fulfill({ json: { ...STATUS, sources: SOURCES } }));
+  await page.goto("/");
+  await expect(page.locator("#sources-panel tbody tr", { hasText: "GPS" }).locator("td").nth(1)).toHaveText("label only (by design)");
+  // PPS not selected: no special wording
+  const noPps = SOURCES.map((s) => (s.name === "PPS" ? { ...s, state: "unusable" } : s));
+  await page.unroute("**/api/status*");
+  await page.route("**/api/status*", (route) => route.fulfill({ json: { ...STATUS, sources: noPps } }));
+  await page.reload();
+  await expect(page.locator("#sources-panel tbody tr", { hasText: "GPS" }).locator("td").nth(1)).toHaveText("unusable");
+});
+
+test("the sources table words each chrony state in plain English", async ({ page }) => {
+  const sources = [
+    { name: "PPS", state: "selected" },
+    { name: "192.0.2.1", state: "combined" },
+    { name: "192.0.2.2", state: "not_combined" },
+    { name: "192.0.2.3", state: "rejected" },
+    { name: "192.0.2.4", state: "too_variable" },
+    { name: "192.0.2.5", state: "unusable" },
+  ].map((s) => ({ ...s, stratum: 2, adjusted_offset_seconds: 0, estimated_error_seconds: 0.01 }));
+  await page.route("**/api/status*", (route) => route.fulfill({ json: { ...STATUS, sources } }));
+  await page.goto("/");
+  const states = page.locator("#sources-panel tbody tr td:nth-child(2)");
+  await expect(states).toHaveText(["selected", "blended in", "backup, not used", "rejected (disagrees)", "too jittery", "unusable"]);
+  await expect(states.nth(2)).toHaveAttribute("title", /not blended in/);
+  // the raw state still drives the row styling
+  await expect(page.locator("#sources-panel tbody tr").nth(0)).toHaveClass(/state-selected/);
+  await expect(page.locator("#sources-panel tbody tr").nth(2)).toHaveClass(/state-not_combined/);
+});
+
+test("the server adds a DNS name to network sources, only for plain hostnames, and leaves IPs and clocks alone", async () => {
+  const src = (name) => ({ name, state: "not_combined", stratum: 2, adjusted_offset_seconds: 0, estimated_error_seconds: 0.01 });
+  const agent = await startFakeAgent({ sources: [src("PPS"), src("192.0.2.10"), src("192.0.2.20"), src("192.0.2.30"), src("192.0.2.40")] });
+  const server = await startServer({
+    AGENT_URL: agent.url,
+    POLL_INTERVAL_MS: "100",
+    RDNS_OVERRIDE: JSON.stringify({ "192.0.2.10": "ntp.example.org.", "192.0.2.30": "<img src=x onerror=alert(1)>.example.org", "192.0.2.40": "40.2.0.192.in-addr.arpa" }),
+  });
+  try {
+    // the first poll starts the lookups, a later one carries the names
+    await expect
+      .poll(async () => (await getJson(`${server.base}/api/status`)).sources.find((s) => s.name === "192.0.2.10")?.hostname, { timeout: 8000 })
+      .toBe("ntp.example.org");
+    const { sources } = await getJson(`${server.base}/api/status`);
+    const byName = Object.fromEntries(sources.map((s) => [s.name, s]));
+    expect(byName["PPS"].hostname).toBeUndefined(); // not an IP
+    expect(byName["192.0.2.20"].hostname).toBeUndefined(); // no name
+    expect(byName["192.0.2.30"].hostname).toBeUndefined(); // markup in a DNS name is refused
+    expect(byName["192.0.2.40"].hostname).toBeUndefined(); // an .arpa answer is not a real name
+  } finally {
+    await server.stop();
+    agent.close();
+  }
+});
+
+test("the sources table shows the DNS name with the IP in the hover text, and escapes it", async ({ page }) => {
+  const sources = [
+    { name: "192.0.2.10", hostname: "ntp.example.org", state: "not_combined" },
+    { name: "192.0.2.20", state: "not_combined" },
+    { name: "192.0.2.30", hostname: "<b>x</b>", state: "not_combined" },
+  ].map((s) => ({ ...s, stratum: 2, adjusted_offset_seconds: 0, estimated_error_seconds: 0.01 }));
+  await page.route("**/api/status*", (route) => route.fulfill({ json: { ...STATUS, sources } }));
+  await page.goto("/");
+  const names = page.locator("#sources-panel tbody tr td:first-child");
+  await expect(names).toHaveText(["ntp.example.org", "192.0.2.20", "<b>x</b>"]); // shown as text, never as markup
+  await expect(names.nth(0)).toHaveAttribute("title", "192.0.2.10");
+});
+
+test("the sources table updates its numbers in place, so a hover tooltip survives the redraws", async ({ page }) => {
+  let offset = 0.001;
+  const source = (name, hostname) => ({ name, hostname, state: "not_combined", stratum: 2, adjusted_offset_seconds: offset, estimated_error_seconds: 0.01 });
+  await page.route("**/api/status*", (route) => route.fulfill({ json: { ...STATUS, sources: [source("192.0.2.10", "ntp.example.org"), source("192.0.2.20")] } }));
+  await page.goto("/");
+  const firstName = page.locator("#sources-panel tbody tr").first().locator("td").first();
+  await expect(firstName).toHaveText("ntp.example.org");
+  const handle = await firstName.elementHandle();
+  await expect(page.locator("#sources-panel tbody tr").first().locator("td").nth(3)).toHaveText("1.0 ms");
+  offset = 0.002; // the next poll carries new numbers for the same sources
+  await expect(page.locator("#sources-panel tbody tr").first().locator("td").nth(3)).toHaveText("2.0 ms", { timeout: 8000 });
+  expect(await handle.evaluate((el) => el.isConnected)).toBe(true); // the name cell is the same element, not a copy
+  await expect(firstName).toHaveAttribute("title", "192.0.2.10");
 });

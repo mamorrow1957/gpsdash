@@ -1,5 +1,7 @@
 const express = require("express");
 const path = require("path");
+const dns = require("dns").promises;
+const net = require("net");
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -26,6 +28,51 @@ let agentEpoch = null; // the agent run our copy is in step with, and the newest
 let agentSeq = 0;
 let agentHasHistory = null; // null = not known yet, false = an older agent without /history (see syncHistory)
 let latest = null; // { at, data } from the last successful status poll
+
+// Network time servers are reported by IP address. The page shows each one's reverse-DNS name when it has one, so this
+// server looks the names up in the background and adds them to the sources it serves (the agent and chrony are untouched,
+// and everything still talks to the servers by IP). A name is kept for an hour and a miss for 10 minutes. Only plain
+// hostname characters are accepted, since DNS can hold anything. RDNS_OVERRIDE (JSON: {ip: name}) replaces DNS in tests.
+const RDNS_OK_MS = 60 * 60 * 1000;
+const RDNS_MISS_MS = 10 * 60 * 1000;
+const rdnsOverride = process.env.RDNS_OVERRIDE ? JSON.parse(process.env.RDNS_OVERRIDE) : null;
+const rdnsCache = new Map(); // ip -> { name | null, at }
+const rdnsPending = new Set();
+
+function cleanHostname(name) {
+  const n = String(name || "").replace(/\.$/, "");
+  return n.length > 0 && n.length <= 253 && /^[A-Za-z0-9._-]+$/.test(n) && !n.endsWith(".arpa") ? n : null;
+}
+
+async function lookupHostname(ip) {
+  if (rdnsOverride) return cleanHostname(rdnsOverride[ip]);
+  const names = await Promise.race([dns.reverse(ip), new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 3000))]);
+  return cleanHostname(names[0]);
+}
+
+function hostnameFor(ip) {
+  const hit = rdnsCache.get(ip);
+  const fresh = hit && Date.now() - hit.at < (hit.name ? RDNS_OK_MS : RDNS_MISS_MS);
+  if (!fresh && !rdnsPending.has(ip)) {
+    rdnsPending.add(ip);
+    lookupHostname(ip)
+      .then((name) => rdnsCache.set(ip, { name, at: Date.now() }))
+      .catch(() => rdnsCache.set(ip, { name: null, at: Date.now() }))
+      .finally(() => rdnsPending.delete(ip));
+  }
+  return hit ? hit.name : null; // a stale name is still shown while it is refreshed
+}
+
+function addHostnames(data) {
+  if (!data || !Array.isArray(data.sources)) return data;
+  return {
+    ...data,
+    sources: data.sources.map((s) => {
+      const name = net.isIP(s.name) ? hostnameFor(s.name) : null;
+      return name ? { ...s, hostname: name } : s;
+    }),
+  };
+}
 let lastError = "no data from the agent yet";
 let inflight = null;
 
@@ -87,7 +134,7 @@ async function syncHistory(status) {
 async function pollAgent() {
   try {
     const data = await fetchJson(agentUrl);
-    latest = { at: Date.now(), data };
+    latest = { at: Date.now(), data: addHostnames(data) };
     lastError = null;
     await syncHistory(data);
   } catch (err) {

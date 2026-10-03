@@ -117,6 +117,35 @@ function renderNtp(ntp, sources) {
   `;
 }
 
+// Plain-English wording for chrony's source states (the hover text explains each one). The raw state stays on the row's
+// CSS class, so styling is unchanged.
+const SOURCE_STATE_TEXT = {
+  selected: ["selected", "The source chrony is steering the clock from right now"],
+  combined: ["blended in", "A good source chrony averages in with the selected one"],
+  not_combined: ["backup, not used", "Healthy and reachable, but not blended in: the selected source is far more precise"],
+  rejected: ["rejected (disagrees)", "chrony thinks this source is wrong because it disagrees with the others"],
+  too_variable: ["too jittery", "Its measurements swing too much to trust"],
+  unusable: ["unusable", "chrony cannot use this source: unreachable, failing a check, or set not to be selected"],
+};
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+}
+
+// A network server shows its DNS name when the server found one (the IP address stays in the hover text); otherwise the IP.
+function sourceNameCell(s) {
+  if (!s.hostname) return `<td>${escapeHtml(s.name)}</td>`;
+  return `<td title="${escapeHtml(s.name)}">${escapeHtml(s.hostname)}</td>`;
+}
+
+function sourceStateCell(s, ppsSelected) {
+  if (s.name === "GPS" && s.state === "unusable" && ppsSelected) {
+    return `<td title="chrony reads the GPS serial time only to tell PPS which second each pulse belongs to; it never steers the clock from it">label only (by design)</td>`;
+  }
+  const [text, hint] = SOURCE_STATE_TEXT[s.state] || [s.state, ""];
+  return `<td${hint ? ` title="${hint}"` : ""}>${text}</td>`;
+}
+
 function renderSources(sources) {
   const el = document.getElementById("sources-panel");
   if (!sources || sources.length === 0) {
@@ -124,15 +153,32 @@ function renderSources(sources) {
     return;
   }
   const ppsSelected = sources.some((x) => x.name === "PPS" && x.state === "selected");
-  const rows = sources
+  // chrony lists reference clocks in config-file order (GPS before PPS). Show the pulse first, then GPS, then the network
+  // servers; the sort is stable, so everything else keeps the order chrony reported.
+  const rank = (s) => (s.name === "PPS" ? 0 : s.name === "GPS" ? 1 : 2);
+  const ordered = [...sources].sort((a, b) => rank(a) - rank(b));
+  const numbers = (s) => [String(s.stratum), fmtOffset(s.adjusted_offset_seconds), fmtOffset(s.estimated_error_seconds)];
+  // The page redraws every poll, and a browser only shows a hover tooltip if the element under the pointer stays put. So
+  // when the same sources are listed in the same states, only the numbers are updated in place; the table is rebuilt only
+  // when a source, its name or its state changes.
+  const signature = ordered.map((s) => [s.name, s.hostname || "", s.state, sourceStateCell(s, ppsSelected)].join("|")).join("\n");
+  const existing = el.querySelector("table");
+  if (existing && existing.dataset.signature === signature) {
+    existing.querySelectorAll("tbody tr").forEach((tr, i) => {
+      numbers(ordered[i]).forEach((text, n) => {
+        const cell = tr.children[n + 2];
+        if (cell.textContent !== text) cell.textContent = text;
+      });
+    });
+    return;
+  }
+  const rows = ordered
     .map(
       (s) => `
       <tr class="state-${s.state}">
-        <td>${s.name}</td>
-        <td>${s.name === "GPS" && s.state === "unusable" && ppsSelected ? "label only (by design)" : s.state}</td>
-        <td>${s.stratum}</td>
-        <td>${fmtOffset(s.adjusted_offset_seconds)}</td>
-        <td>${fmtOffset(s.estimated_error_seconds)}</td>
+        ${sourceNameCell(s)}
+        ${sourceStateCell(s, ppsSelected)}
+        ${numbers(s).map((text) => `<td>${text}</td>`).join("")}
       </tr>`
     )
     .join("");
@@ -142,6 +188,7 @@ function renderSources(sources) {
       <tbody>${rows}</tbody>
     </table>
   `;
+  el.querySelector("table").dataset.signature = signature;
 }
 
 const SKY_SIZE = 220;
